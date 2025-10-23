@@ -9,6 +9,7 @@
     holding buffers for the duration of a data transfer."
 )]
 
+use axs5106l::Axs5106l;
 use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
@@ -25,6 +26,7 @@ use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     gpio::{Level, Output, OutputConfig},
+    i2c::master::{Config as ConfigI2C, I2c},
     spi::{
         Mode,
         master::{Config, Spi},
@@ -64,6 +66,8 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     info!("Embassy initialized!");
+
+//#region init display
 
     // init display (1.47inch capacitive touch LCD display, 172×320 resolution, 262K color with display chip Jadard JD9853 (compatible with ST7789? ) and touch chip AXS5106L )
     // LCD_CLK GPIO1
@@ -119,6 +123,27 @@ async fn main(spawner: Spawner) -> ! {
         display.size().width,
         display.size().height
     );
+
+    // init axs5106l touch controller:
+    // on i2c shared with IMU QMI8658 (IMU_SDA GPIO18, IMU_SCL GPIO19)
+    // TP_SCL GPIO19
+    // TP_SDA GPIO18
+    // TP_RST GPIO20
+    // TP_INT GPIO21
+    let td_rst = Output::new(peripherals.GPIO20, Level::Low, OutputConfig::default());
+
+    let config_i2c = ConfigI2C::default().with_frequency(Rate::from_khz(100));
+    let i2c = I2c::new(
+        peripherals.I2C0, config_i2c,
+    ).unwrap().with_sda(peripherals.GPIO18).with_scl(peripherals.GPIO19);
+    
+    let mut touch_driver = Axs5106l::new(i2c, td_rst, 172, 320, axs5106l::Rotation::Rotate0);
+    match touch_driver.init(&mut delay) {
+        Ok(_) => info!("AXS5106L touch controller initialized"),
+        Err(_e) => warn!("Failed to initialize AXS5106L touch controller"),
+    };
+
+
     lcd_bl.set_high(); // turn on backlight
 
     display.clear(Rgb565::BLACK).unwrap();
@@ -186,5 +211,11 @@ async fn main(spawner: Spawner) -> ! {
             .draw(&mut display)
             .unwrap();
         angle_bg = Some(angle_start);
+
+        if let Ok(Some(touches)) = touch_driver.get_touch_data() {
+            for (i, touch) in touches.points.iter().enumerate() {
+                info!("Touch {}: X: {}, Y: {}", i, touch.x, touch.y);
+            }
+        }
     }
 }
