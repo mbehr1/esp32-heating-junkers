@@ -52,7 +52,9 @@ panic-rtt-target = { version = "0.2.0", features = ["defmt"] }
 rtt-target = { version = "0.6.1", features = ["defmt"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
 embassy-executor = { version = "0.9.1", features = ["defmt"] }
+embassy-futures = { version = "0.1.2", features = ["defmt"] }
 embassy-time = { version = "0.5.0", features = ["defmt"] }
+embassy-sync = { version = "0.7.2", features = ["defmt"] }
 esp-radio = { version = "0.16.0", features = [
   "defmt",
   "esp-alloc",
@@ -92,6 +94,7 @@ serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 serde-json-core = "0.6.0"
 heapless = "0.9.1"
 core-json = "0.4.0"
+embedded-websocket = {version = "0.9.4", default-features = false }
 
 # Force reqwless to use your esp-mbedtls fork
 [patch."https://github.com/esp-rs/esp-mbedtls"]
