@@ -38,6 +38,7 @@ embassy-net = { version = "0.7.0", features = [
   "defmt",
   "dhcpv4",
   "dhcpv4-hostname",
+  "dns",
   "medium-ethernet",
   "tcp",
   "udp",
@@ -81,6 +82,21 @@ mipidsi = "0.9.0"
 axs5106l = "0.1.0"
 
 toml-cfg = "0.2.0"
+
+#reqwless = { version = "0.13", default-features = false, features = ["defmt", "esp-mbedtls"], git="https://github.com/ImplFerris/reqwless", branch="esp-hal-1.0.0" }
+esp-mbedtls = { version="0.1", git="https://github.com/mbehr1/esp-mbedtls", features=["esp32c6", "async"]}
+reqwless = { version = "0.13", default-features = false, features = ["defmt", "esp-mbedtls", "alloc"], git="https://github.com/mbehr1/reqwless", branch = "fix/defmt_esp-mbedtls"}
+embedded-nal-async = "0.8.0"
+
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+serde-json-core = "0.6.0"
+heapless = "0.9.1"
+core-json = "0.4.0"
+
+# Force reqwless to use your esp-mbedtls fork
+[patch."https://github.com/esp-rs/esp-mbedtls"]
+esp-mbedtls = { git = "https://github.com/mbehr1/esp-mbedtls" }
+esp-mbedtls-sys = { git = "https://github.com/mbehr1/esp-mbedtls" }
 
 [dev-dependencies]
 embedded-test = { version = "0.7.0-alpha.3", git = "https://github.com/probe-rs/embedded-test", branch = "next", features = [
