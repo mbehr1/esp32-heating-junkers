@@ -26,7 +26,7 @@ use axs5106l::Axs5106l;
 use core::cell::RefCell;
 use defmt::{info, warn};
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{Either, select};
 use embassy_net::{DhcpConfig, Runner, Stack, StackResources};
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::{Duration, Timer};
@@ -427,6 +427,165 @@ struct HmIpGetHostResponse<'a> {
     url_websocket: &'a str,
 }
 
+/// Process a JSON device object and update the DEVICES list if it's a HEATING_THERMOSTAT
+fn json_process_device<'read, 'parent, R, S>(
+    mut device: core_json::Field<'read, 'parent, R, S>,
+) -> Result<(), ()>
+where
+    R: core_json::Read<'read>,
+    S: core_json::Stack,
+{
+    let mut dev_id: heapless::String<50> = device.key().filter_map(|k| k.ok()).collect();
+    info!("Processing 'device' with key: {}", dev_id); // works with "device":{id:..} as well! dev_id is overwritten later
+
+    if let Ok(mut dev_fields) = device.value().fields() {
+        let mut low_bat: Option<bool> = None;
+        let mut last_status_update: Option<i64> = None;
+        let mut label: Option<heapless::String<50>> = None;
+        let mut valve_position: Option<f64> = None;
+        let mut set_point_temp: Option<f64> = None;
+        let mut valve_act_temp: Option<f64> = None;
+
+        while let Some(Ok(mut dev_field)) = dev_fields.next() {
+            let dev_field_key: heapless::String<100> =
+                dev_field.key().filter_map(|k| k.ok()).collect();
+
+            match dev_field_key.as_ref() {
+                "id" => {
+                    if let Ok(id_str) = dev_field.value().to_str() {
+                        dev_id = id_str.filter_map(|k| k.ok()).collect();
+                        info!("  device id: {}", dev_id);
+                    }
+                }
+                "type" => {
+                    if let Ok(device_type) = dev_field.value().to_str() {
+                        let dev_type: heapless::String<100> =
+                            device_type.filter_map(|k| k.ok()).collect();
+                        info!("  deviceType: {}", dev_type);
+                        if dev_type.as_str() != "HEATING_THERMOSTAT" {
+                            return Err(());
+                        }
+                    }
+                }
+                "lastStatusUpdate" => {
+                    last_status_update = dev_field.value().to_number().ok().and_then(|n| n.i64());
+                    info!("  lastStatusUpdate: {}", last_status_update);
+                }
+                "label" => {
+                    if let Ok(label_str) = dev_field.value().to_str() {
+                        label = Some(label_str.filter_map(|k| k.ok()).collect());
+                        info!("  label: {}", label);
+                    }
+                }
+                "functionalChannels" => {
+                    if let Ok(mut channels) = dev_field.value().fields() {
+                        while let Some(Ok(mut channel)) = channels.next() {
+                            let channel_idx: heapless::String<10> =
+                                channel.key().filter_map(|k| k.ok()).collect();
+
+                            if let Ok(mut channel_fields) = channel.value().fields() {
+                                while let Some(Ok(mut channel_field)) = channel_fields.next() {
+                                    let channel_field_key: heapless::String<100> =
+                                        channel_field.key().filter_map(|k| k.ok()).collect();
+
+                                    match (channel_idx.as_ref(), channel_field_key.as_ref()) {
+                                        ("0", "lowBat") => {
+                                            if let Ok(b) = channel_field.value().to_bool() {
+                                                low_bat = Some(b);
+                                                info!("     lowBat: {}", low_bat);
+                                            }
+                                        }
+                                        ("1", "valvePosition") => {
+                                            valve_position = channel_field
+                                                .value()
+                                                .to_number()
+                                                .ok()
+                                                .and_then(|n| n.f64());
+                                            info!("     valvePosition: {}", valve_position);
+                                        }
+                                        ("1", "setPointTemperature") => {
+                                            set_point_temp = channel_field
+                                                .value()
+                                                .to_number()
+                                                .ok()
+                                                .and_then(|n| n.f64());
+                                            info!("     setPointTemperature: {}", set_point_temp);
+                                        }
+                                        ("1", "valveActualTemperature") => {
+                                            valve_act_temp = channel_field
+                                                .value()
+                                                .to_number()
+                                                .ok()
+                                                .and_then(|n| n.f64());
+                                            info!(
+                                                "     valveActualTemperature: {}",
+                                                valve_act_temp
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Check if we have all mandatory fields for a heating thermostat device
+        if let (
+            Some(last_status_update),
+            Some(low_bat),
+            Some(label),
+            Some(valve_position),
+            Some(set_point_temp),
+            Some(valve_act_temp),
+        ) = (
+            last_status_update,
+            low_bat,
+            label,
+            valve_position,
+            set_point_temp,
+            valve_act_temp,
+        ) {
+            let heating_thermostat = HeatingThermostat {
+                id: dev_id.clone(),
+                label,
+                last_status_update,
+                low_bat,
+                valve_position,
+                set_point_temp,
+                valve_act_temp,
+            };
+            //info!("  Created HeatingThermostat device: {}", heating_thermostat);
+
+            // Store in global devices list
+            DEVICES.lock(|devices| {
+                let mut devices = devices.borrow_mut();
+                if let Some(pos) = devices.iter().position(|d| d.id == dev_id) {
+                    info!("  Updating existing device: {}", devices[pos]);
+                    devices[pos] = heating_thermostat;
+                    info!("  Updated existing device:  {}", devices[pos]);
+                } else {
+                    info!("  Adding HeatingThermostat device: {}", heating_thermostat);
+                    if devices.push(heating_thermostat).is_ok() {
+                        info!("  Added new device to DEVICES list");
+                    } else {
+                        warn!("  DEVICES list full, cannot add new device");
+                    }
+                }
+            });
+            Ok(())
+        } else {
+            info!("  Missing mandatory fields device {}. ignoring.", dev_id);
+            Err(())
+        }
+    } else {
+        Err(())
+    }
+}
+
 #[embassy_executor::task]
 async fn cloud_connection_task(
     stack: Stack<'static>,
@@ -572,220 +731,8 @@ async fn cloud_connection_task(
                                                 // info!("Processing 'devices':");
                                                 // iterate over devices: (object keys are device ids)
                                                 if let Ok(mut devices) = field.value().fields() {
-                                                    while let Some(Ok(mut device)) = devices.next()
-                                                    {
-                                                        // process each device object
-                                                        let mut dev_id: heapless::String<50> =
-                                                            device
-                                                                .key()
-                                                                .filter_map(|k| k.ok())
-                                                                .collect();
-                                                        info!(
-                                                            "Processing 'device' with key: {}",
-                                                            dev_id
-                                                        );
-                                                        if let Ok(mut dev_fields) =
-                                                            device.value().fields()
-                                                        {
-                                                            let mut low_bat: Option<bool> = None; // functionalChannels.0.lowBat
-                                                            // todo use functionalChannels.0.unreach|devicePowerFailureDetected?
-                                                            let mut last_status_update: Option<
-                                                                i64,
-                                                            > = None; // .lastStatusUpdate
-                                                            let mut label: Option<
-                                                                heapless::String<50>,
-                                                            > = None; // .label
-                                                            let mut valve_position: Option<f64> =
-                                                                None; // functionalChannels.1.valvePosition
-                                                            let mut set_point_temp: Option<f64> =
-                                                                None; // functionalChannels.1.setPointTemperature
-                                                            let mut valve_act_temp: Option<f64> =
-                                                                None; // functionalChannels.1.valveActualTemperature
-                                                            while let Some(Ok(mut dev_field)) =
-                                                                dev_fields.next()
-                                                            {
-                                                                let dev_field_key:heapless::String<100> = dev_field.key().filter_map(|k|k.ok()).collect();
-                                                                // info!(" Device field key: {}",dev_field_key);
-                                                                // process device fields here...
-                                                                match dev_field_key.as_ref() {
-                                                                    "id" => {
-                                                                        // overwrite dev_key with actual id from field
-                                                                        if let Ok(id_str) =
-                                                                            dev_field
-                                                                                .value()
-                                                                                .to_str()
-                                                                        {
-                                                                            dev_id = id_str
-                                                                                .filter_map(|k| {
-                                                                                    k.ok()
-                                                                                })
-                                                                                .collect();
-                                                                            info!(
-                                                                                "  device id: {}",
-                                                                                dev_id
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                    "type" => {
-                                                                        if let Ok(device_type) =
-                                                                            dev_field
-                                                                                .value()
-                                                                                .to_str()
-                                                                        {
-                                                                            let dev_type :heapless::String<100> = device_type.filter_map(|k|k.ok()).collect();
-                                                                            info!(
-                                                                                "  deviceType: {}",
-                                                                                dev_type
-                                                                            );
-                                                                            if !(dev_type.as_str()
-                                                                                == "HEATING_THERMOSTAT")
-                                                                            {
-                                                                                break;
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    "lastStatusUpdate" => {
-                                                                        last_status_update =
-                                                                            dev_field
-                                                                                .value()
-                                                                                .to_number()
-                                                                                .ok()
-                                                                                .and_then(|n| {
-                                                                                    n.i64()
-                                                                                });
-                                                                        info!(
-                                                                            "  lastStatusUpdate: {}",
-                                                                            last_status_update
-                                                                        );
-                                                                    }
-                                                                    "label" => {
-                                                                        if let Ok(label_str) =
-                                                                            dev_field
-                                                                                .value()
-                                                                                .to_str()
-                                                                        {
-                                                                            label = Some(
-                                                                                label_str
-                                                                                    .filter_map(
-                                                                                        |k| k.ok(),
-                                                                                    )
-                                                                                    .collect(),
-                                                                            );
-                                                                            info!(
-                                                                                "  label: {}",
-                                                                                label
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                    "functionalChannels" => {
-                                                                        if let Ok(mut channels) =
-                                                                            dev_field
-                                                                                .value()
-                                                                                .fields()
-                                                                        {
-                                                                            while let Some(Ok(
-                                                                                mut channel,
-                                                                            )) =
-                                                                                channels.next()
-                                                                            {
-                                                                                let channel_idx:heapless::String<10> = channel.key().filter_map(|k|k.ok()).collect();
-                                                                                //info!("   functionalChannel idx: {}",channel_idx);
-                                                                                // iterate over channel fields:
-                                                                                if let Ok(
-                                                                                    mut
-                                                                                    channel_fields,
-                                                                                ) = channel
-                                                                                    .value()
-                                                                                    .fields()
-                                                                                {
-                                                                                    while let Some(Ok(mut channel_field))=channel_fields.next(){
-                                                                                        let channel_field_key:heapless::String<100> = channel_field.key().filter_map(|k|k.ok()).collect();
-                                                                                        // info!("    channel field key: {}",channel_field_key);
-                                                                                        match (channel_idx.as_ref(), channel_field_key.as_ref()){
-                                                                                            ("0","lowBat")=>{
-                                                                                                if let Ok(b)=channel_field.value().to_bool(){
-                                                                                                    low_bat = Some(b);
-                                                                                                    info!("     lowBat: {}",low_bat);
-                                                                                                }
-                                                                                            }
-                                                                                            ("1","valvePosition")=>{
-                                                                                                valve_position = channel_field.value().to_number().ok().and_then(|n|n.f64());
-                                                                                                info!("     valvePosition: {}",valve_position);
-                                                                                            }
-                                                                                            ("1","setPointTemperature")=>{
-                                                                                                set_point_temp = channel_field.value().to_number().ok().and_then(|n|n.f64());
-                                                                                                info!("     setPointTemperature: {}",set_point_temp);
-                                                                                            }
-                                                                                            ("1","valveActualTemperature")=>{
-                                                                                                valve_act_temp = channel_field.value().to_number().ok().and_then(|n|n.f64());
-                                                                                                info!("     valveActualTemperature: {}",valve_act_temp);
-                                                                                            }
-                                                                                            _=>{
-                                                                                                // info!("     Ignoring channel {} key: {}",channel_idx, channel_field_key);
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    _ => {
-                                                                        // info!("  Ignoring device field key: {}",dev_field_key);
-                                                                    }
-                                                                }
-                                                            }
-                                                            // check if we have all mandatory fields for a heating thermostat device here...
-                                                            if let (
-                                                                Some(last_status_update),
-                                                                Some(low_bat),
-                                                                Some(label),
-                                                                Some(valve_position),
-                                                                Some(set_point_temp),
-                                                                Some(valve_act_temp),
-                                                            ) = (
-                                                                last_status_update,
-                                                                low_bat,
-                                                                label,
-                                                                valve_position,
-                                                                set_point_temp,
-                                                                valve_act_temp,
-                                                            ) {
-                                                                // all fields present, create/update device entry
-                                                                let heating_thermostat =
-                                                                    HeatingThermostat {
-                                                                        id: dev_id,
-                                                                        label,
-                                                                        last_status_update,
-                                                                        low_bat,
-                                                                        valve_position,
-                                                                        set_point_temp,
-                                                                        valve_act_temp,
-                                                                    };
-                                                                info!(
-                                                                    "  Created HeatingThermostat device: {}",
-                                                                    heating_thermostat
-                                                                );
-                                                                // store in global devices list:
-                                                                DEVICES.lock(|devices|{
-                                                                    let mut devices = devices.borrow_mut();
-                                                                    if let Some(pos) = devices.iter().position(|d| d.id == heating_thermostat.id) {
-                                                                        devices[pos] = heating_thermostat;
-                                                                        info!("  Updated existing device in DEVICES list");
-                                                                    } else {
-                                                                        if devices.push(heating_thermostat).is_ok() {
-                                                                            info!("  Added new device to DEVICES list");
-                                                                        } else {
-                                                                            warn!("  DEVICES list full, cannot add new device");
-                                                                        }
-                                                                    }
-                                                                });
-                                                            } else {
-                                                                info!(
-                                                                    "  Missing mandatory fields device {}. ignoring.",
-                                                                    dev_id
-                                                                );
-                                                            }
-                                                        }
+                                                    while let Some(Ok(device)) = devices.next() {
+                                                        let _ = json_process_device(device);
                                                     }
                                                 }
                                             }
@@ -843,6 +790,59 @@ async fn cloud_connection_task(
     }
 
     if let Some(url_websocket) = &*url_websocket.borrow() {
+        let process_binary_cb = |data: &mut [u8]| {
+            info!("Received websocket binary data, len: {}", data.len());
+            if let Ok(ref mut des) =
+                core_json::Deserializer::<&[u8], core_json::ConstStack<20>>::new(&data[..])
+            {
+                if let Ok(val) = des.value(){
+                    if let Ok(mut fields) = val.fields(){
+                        while let Some(Ok(mut field)) = fields.next(){
+                            let key: heapless::String<64> =
+                                            field.key().filter_map(|k| k.ok()).collect();
+                            match key.as_ref(){
+                                "events"=>{
+                                    info!("Processing 'events' object");
+                                    if let Ok(mut events) = field.value().fields(){
+                                        while let Some(Ok(mut event)) = events.next(){
+                                            let event_key: heapless::String<10> =
+                                                event.key().filter_map(|k| k.ok()).collect();
+                                            info!(" Processing event key: {}", event_key);
+                                            if let Ok(mut event_fields) = event.value().fields(){
+                                                while let Some(Ok(mut event_field)) = event_fields.next(){
+                                                    let event_field_key: heapless::String<100> =
+                                                        event_field.key().filter_map(|k| k.ok()).collect();
+                                                    match event_field_key.as_ref(){
+                                                        "device"=>{
+                                                            let _ = json_process_device(event_field); // TODO only if pushEventType is "DEVICE_CHANGED"? (assuming this comes always first...)
+                                                        }
+                                                        _=>{
+                                                            info!("  Ignoring event field key: {}", event_field_key);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                "origin"|"timestamp"|"accessPointId"=>{}
+                                _=>{
+                                    info!("Ignoring websocket field key: {}", key);
+                                }
+                            }
+
+                        }
+                    } else {
+                        warn!("Websocket data is not an object");
+                    }
+                } else {
+                    warn!("Failed to parse first JSON value from websocket data");
+                }
+            } else {
+                warn!("Failed to create core_json deserializer for websocket data");
+            }
+        };
+
         // open websocket connection to url_websocket
         let _ws_res = websocket_connection(
             url_websocket,
@@ -855,6 +855,7 @@ async fn cloud_connection_task(
                 ("Sec-WebSocket-Version", "13"),
                 ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub24jZQ=="), // TODO make dynamic!
             ],
+            process_binary_cb,
             &mut client,
         )
         .await;
@@ -877,6 +878,7 @@ async fn cloud_connection_task(
 async fn websocket_connection<'a, T, D>(
     url: &str,
     headers: &[(&str, &str)],
+    mut process_binary_cb: impl for<'cb> FnMut(&mut [u8]) + 'a,
     client: &mut HttpClient<'a, T, D>,
 ) -> Result<(), reqwless::Error>
 where
@@ -949,7 +951,7 @@ where
         );
 
         // loop until connection closed
-        // TODO: most frames are a lot smaller (7kb, 10kb), ignore big ones... 
+        // TODO: most frames are a lot smaller (7kb, 10kb), ignore big ones...
         let mut frame_buffer = heapless::Vec::<u8, { 80 * 1024 }>::new(); // lets hope the events fit into 80kb
         frame_buffer.resize_default(80 * 1024).unwrap();
         let mut frame_buffer_used = 0usize;
@@ -1016,10 +1018,7 @@ where
                                         frame_buffer_used
                                     );
                                     // process message in frame_buffer[..frame_buffer_used] here...
-                                    if let Ok(text) = core::str::from_utf8(&frame_buffer[..frame_buffer_used])
-                                    {
-                                        info!(" Websocket Binary message: {}", text);
-                                    } 
+                                    process_binary_cb(&mut frame_buffer[..frame_buffer_used]);
                                     // for now just reset buffer:
                                     frame_buffer_used = 0;
                                 }
@@ -1041,7 +1040,7 @@ where
                                 ).await?;
                             }
                             embedded_websocket::WebSocketReceiveMessageType::Pong => {
-                                info!(" Websocket Pong message");
+                                // info!(" Websocket Pong message");
                                 frame_buffer_used = 0;
                             }
                             embedded_websocket::WebSocketReceiveMessageType::CloseMustReply | embedded_websocket::WebSocketReceiveMessageType::CloseCompleted => {
@@ -1075,7 +1074,7 @@ where
                     );
                     break;
                 }
-                Either::Second(_) => {  
+                Either::Second(_) => {
                     //warn!("Timeout waiting for data from websocket connection");
                     // send a ping
                     let len = ws_client
@@ -1086,8 +1085,11 @@ where
                             &mut tx_buffer,
                         )
                         .unwrap();
-                    let written =
-                        esp_mbedtls::asynch::io::Write::write(&mut resource.conn, &tx_buffer[..len]).await?;
+                    let written = esp_mbedtls::asynch::io::Write::write(
+                        &mut resource.conn,
+                        &tx_buffer[..len],
+                    )
+                    .await?;
                     esp_mbedtls::asynch::io::Write::flush(&mut resource.conn).await?;
                     info!(
                         "Sent ping frame len {}, wrote {} bytes to websocket connection: {:?}",
