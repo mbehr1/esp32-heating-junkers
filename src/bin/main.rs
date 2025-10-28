@@ -4,6 +4,7 @@
 // [] show error/state on display, e.g. state of wifi, ip, internet connectivity
 // [] check stack memory usage and add stack overflow handlers
 // [] detect USB/JTAG and show "debug infos"?
+// [] handle devices becoming stale, removed from event updates, not reachable...
 // [] OTA update support
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
 // [] turn display orientation according to inertia sensor
@@ -36,11 +37,9 @@ use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
     geometry::AnchorPoint,
-    mono_font::{MonoTextStyle, ascii::FONT_8X13},
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, StrokeAlignment},
-    text::{Alignment, Text},
+    primitives::{PrimitiveStyle, Rectangle},
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::{
@@ -53,7 +52,7 @@ use esp_hal::{
         Mode,
         master::{Config, Spi},
     },
-    time::Rate,
+    time::{Instant, Rate},
     timer::timg::TimerGroup,
 };
 use esp_radio::wifi::{ClientConfig, ModeConfig, WifiController, WifiDevice, WifiError};
@@ -74,6 +73,8 @@ use reqwless::{client::HttpClient, request::RequestBuilder};
 use serde::Deserialize;
 
 extern crate alloc;
+
+use hzg_roon_junkers::display_handling::{draw_init_screen, draw_text};
 
 static TZ: TimeZone = tz::get!("Europe/Berlin");
 
@@ -113,11 +114,12 @@ struct ConfigToml {
 
 #[derive(Debug)]
 struct HMIPHome {
-    timestamp_last_update: i64,
+    /// not the timestamp but the local uptime
+    uptime_last_update: Instant,
     weather: WeatherData,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct WeatherData {
     /// outside temperature
     temperature: f64,
@@ -281,29 +283,8 @@ async fn main(spawner: Spawner) -> ! {
 
     lcd_bl.set_high(); // turn on backlight
 
-    display.clear(Rgb565::BLACK).unwrap();
-    info!("Display cleared");
-    let border_stroke = PrimitiveStyleBuilder::new()
-        .stroke_color(Rgb565::BLUE)
-        .stroke_width(1)
-        .stroke_alignment(StrokeAlignment::Inside)
-        .build();
-    display
-        .bounding_box()
-        .into_styled(border_stroke)
-        .draw(&mut display)
-        .unwrap();
-
-    let text = CONFIG_TOML.display_title;
-    let character_style = MonoTextStyle::new(&FONT_8X13 /*FONT_6X10*/, Rgb565::WHITE);
-    Text::with_alignment(
-        text,
-        display.bounding_box().anchor_point(AnchorPoint::TopCenter) + Point::new(0, 15),
-        character_style,
-        Alignment::Center,
-    )
-    .draw(&mut display)
-    .unwrap();
+    draw_init_screen(&mut display, CONFIG_TOML.display_title).unwrap();
+    info!("Display initialized with title and border");
 
     // MARK: init wifi
     let radio_init = mk_static!(
@@ -356,6 +337,9 @@ async fn main(spawner: Spawner) -> ! {
     let mut last_stack_ipv4_addr = None;
 
     let mut last_timestamp_hmip_update: Option<jiff::Timestamp> = None;
+    let mut last_instant_home_update: Instant = Instant::EPOCH;
+    let mut last_sum_last_status_update = 0i64;
+
     loop {
         //info!("Hello world #{}", cnt);
         Timer::after(Duration::from_millis(40)).await;
@@ -406,6 +390,44 @@ async fn main(spawner: Spawner) -> ! {
             last_stack_ipv4_addr = ipv4_addr;
         }
 
+        // check for home/weather updates
+        if cnt % 1000 == 400 {
+            HMIPHOME.lock(|hmiphome| {
+                if let Some(home) = &*hmiphome.borrow() {
+                    if last_instant_home_update != home.uptime_last_update {
+                        last_instant_home_update = home.uptime_last_update;
+                        let text_area = Rectangle::new(Point::new(5, 140), Size::new(160, 20));
+                        if let Ok(weather_text) = heapless::format!(100;
+                            "Weather:{:.1}degC",
+                            home.weather.temperature,
+                        ) {
+                            let _ = draw_text(
+                                &weather_text,
+                                text_area,
+                                Rgb565::BLACK,
+                                Rgb565::WHITE,
+                                &mut display,
+                            );
+                        };
+                        let text_area = Rectangle::new(Point::new(5, 170), Size::new(160, 20));
+                        if let Ok(weather_text) = heapless::format!(100;
+                            "{} {}",
+                            home.weather.condition,
+                            home.weather.daytime,
+                        ) {
+                            let _ = draw_text(
+                                &weather_text,
+                                text_area,
+                                Rgb565::BLACK,
+                                Rgb565::WHITE,
+                                &mut display,
+                            );
+                        };
+                    }
+                }
+            });
+        }
+
         // compare last_timestamp_hmip_update and update display if changed
         if cnt % 1000 == 500 {
             let mut tdp_did_change = false;
@@ -417,7 +439,7 @@ async fn main(spawner: Spawner) -> ! {
                 }
             });
             if tdp_did_change {
-                let text_area = Rectangle::new(Point::new(10, 200), Size::new(150, 20));
+                let text_area = Rectangle::new(Point::new(5, 200), Size::new(160, 20));
                 if let Some(tsp) = last_timestamp_hmip_update {
                     let local_time = tsp.to_zoned(TZ.clone());
                     //let date = local_time.date();
@@ -445,35 +467,47 @@ async fn main(spawner: Spawner) -> ! {
         // show list of devices on screen: (only if updates... detect via last_status_update max value)
         if cnt % 1000 == 0 {
             DEVICES.lock(|devices| {
-                // clear area:
-                let clear_area = Rectangle::new(
-                    display.bounding_box().anchor_point(AnchorPoint::BottomLeft)
-                        - Point::new(5, 2 + (15 * 6) as i32),
-                    Size::new(162, 15 * 6),
-                );
-                display
-                    .fill_solid(&clear_area, Rgb565::CSS_LIGHT_GRAY)
-                    .unwrap();
+                let devices = devices.borrow();
+                let sum_last_status_update: i64 =
+                    devices.iter().map(|d| d.last_status_update).sum::<i64>();
 
-                for device in devices.borrow().iter().enumerate() {
-                    //info!("Device {}: {}", device.0, device.1);
-                    let text = heapless::format!(40;
-                        "HT{}:{:.0}/{:.1}C V{:.0}%",
+                if sum_last_status_update != last_sum_last_status_update {
+                    last_sum_last_status_update = sum_last_status_update;
+                    // redraw device list
+                    // how to remove old devices?
+                    for device in devices.iter().enumerate() {
+                        let text_rect = Rectangle::new(
+                            display.bounding_box().anchor_point(AnchorPoint::BottomLeft)
+                                - Point::new(-5, 16 + (16 * device.0) as i32),
+                            Size::new(160, 15),
+                        );
+                        // use red color for text if heating
+                        // use yellow color for text if low battery
+                        // else use white color
+
+                        if let Ok(text) = heapless::format!(40;
+                        "HT{}:{:>4.1}/{:>4.1}C V{:>2.0}%",
                         device.0,
                         device.1.set_point_temp,
                         device.1.valve_act_temp,
-                        device.1.valve_position*100.0,
-                    )
-                    .unwrap_or_default();
-                    Text::with_alignment(
-                        &text,
-                        display.bounding_box().anchor_point(AnchorPoint::BottomLeft)
-                            - Point::new(5, 5 + (15 * device.0) as i32),
-                        character_style,
-                        Alignment::Left,
-                    )
-                    .draw(&mut display)
-                    .unwrap();
+                        device.1.valve_position*100.0,)
+                        {
+                            let text_color = if device.1.valve_position > 0.0 {
+                                Rgb565::RED
+                            } else if device.1.low_bat {
+                                Rgb565::YELLOW
+                            } else {
+                                Rgb565::WHITE
+                            };
+                            let _ = draw_text(
+                                &text,
+                                text_rect,
+                                Rgb565::BLACK,
+                                text_color,
+                                &mut display,
+                            );
+                        };
+                    }
                 }
             });
         }
@@ -488,6 +522,7 @@ extern "C" fn random() -> core::ffi::c_ulong {
         if let Some(ref mut rng) = RNG_INSTANCE {
             rng.random() as core::ffi::c_ulong
         } else {
+            warn!("RNG_INSTANCE not initialized!");
             0
         }
     }
@@ -502,7 +537,8 @@ struct HmIpGetHostResponse<'a> {
 }
 
 fn json_process_weather<'read, 'parent, R, S>(
-    mut weather: core_json::Field<'read, 'parent, R, S>,
+    weather: core_json::Field<'read, 'parent, R, S>,
+    weather_data: &mut WeatherData,
 ) -> Result<(), ()>
 where
     R: core_json::Read<'read>,
@@ -518,19 +554,22 @@ where
                     if let Some(temp) = weather_field.value().to_number().ok().and_then(|n| n.f64())
                     {
                         info!("  temperature: {}", temp);
+                        weather_data.temperature = temp;
                     }
                 }
                 "weatherCondition" => {
                     if let Ok(cond_str) = weather_field.value().to_str() {
-                        let cond: heapless::String<100> = cond_str.filter_map(|k| k.ok()).collect();
+                        let cond: heapless::String<50> = cond_str.filter_map(|k| k.ok()).collect();
                         info!("  weatherCondition: {}", cond);
+                        weather_data.condition = cond;
                     }
                 }
                 "weatherDayTime" => {
                     if let Ok(daytime_str) = weather_field.value().to_str() {
-                        let daytime: heapless::String<100> =
+                        let daytime: heapless::String<50> =
                             daytime_str.filter_map(|k| k.ok()).collect();
                         info!("  weatherDayTime: {}", daytime);
+                        weather_data.daytime = daytime;
                     }
                 }
                 // ... windSpeed, vaporAmount, humidity
@@ -544,25 +583,38 @@ where
 }
 
 fn json_process_home<'read, 'parent, R, S>(
-    mut home: core_json::Field<'read, 'parent, R, S>,
-) -> Result<(), ()>
+    home: core_json::Field<'read, 'parent, R, S>,
+) -> Result<bool, ()>
 where
     R: core_json::Read<'read>,
     S: core_json::Stack,
 {
     if let Ok(mut home_fields) = home.value().fields() {
+        // new HMIPHome structure:
+        let mut do_update = true;
+        let mut hmip_home = HMIPHome {
+            uptime_last_update: Instant::now(),
+            weather: WeatherData::default(),
+        };
+
         while let Some(Ok(mut home_field)) = home_fields.next() {
             let home_field_key: heapless::String<100> =
                 home_field.key().filter_map(|k| k.ok()).collect();
 
             match home_field_key.as_ref() {
                 "weather" => {
-                    let _ = json_process_weather(home_field);
+                    do_update = json_process_weather(home_field, &mut hmip_home.weather).is_ok()
+                        && do_update;
                 }
                 _ => {}
             }
         }
-        Ok(())
+        if do_update {
+            HMIPHOME.lock(|home| {
+                *home.borrow_mut() = Some(hmip_home);
+            });
+        }
+        Ok(do_update)
     } else {
         Err(())
     }
@@ -1443,38 +1495,4 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     info!("task 'net_task' running...");
     runner.run().await;
     //info!("end net_task");
-}
-
-/// Draw text on the display with background clearing
-///
-/// # Parameters
-/// * `text` - The text to draw
-/// * `bounding_box` - The rectangle area where to draw
-/// * `bg_color` - Background color to fill
-/// * `text_color` - Color of the text
-/// * `display` - Mutable reference to the display
-fn draw_text<D>(
-    text: &str,
-    bounding_box: Rectangle,
-    bg_color: Rgb565,
-    text_color: Rgb565,
-    display: &mut D,
-) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    // Clear the background first
-    display.fill_solid(&bounding_box, bg_color)?;
-
-    // Draw the text
-    let character_style = MonoTextStyle::new(&FONT_8X13, text_color);
-    Text::with_alignment(
-        text,
-        bounding_box.center(),
-        character_style,
-        Alignment::Center,
-    )
-    .draw(display)?;
-
-    Ok(())
 }
