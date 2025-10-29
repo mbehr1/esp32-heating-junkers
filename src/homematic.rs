@@ -623,7 +623,7 @@ where
             let mut request = request.headers(headers).body(body);
             info!("HTTP request prepared, sending...");
             let mut rx_buffer = [0_u8; (100 * 1024)];
-            let response = request.send(&mut rx_buffer).await.unwrap();
+            let response = request.send(&mut rx_buffer).await?;
             info!(
                 "HTTP request sent, response status: {}, content_length: {}",
                 response.status,

@@ -51,6 +51,7 @@ use esp_hal::{
     },
     time::{Instant, Rate},
     timer::timg::TimerGroup,
+    twai,
 };
 use esp_radio::wifi::{ClientConfig, ModeConfig, WifiController, WifiDevice, WifiError};
 use jiff::{
@@ -274,6 +275,48 @@ async fn main(spawner: Spawner) -> ! {
         net_seed,
     );
 
+    /*
+    // timings for 80MHz, but esp32c6 uses 40MHz! (but the brp is halfed later internally, so we can calc with 80MHz)
+    let timing = match self {
+            Self::B125K => TimingConfig {
+                baud_rate_prescaler: 32,
+                sync_jump_width: 3,
+                tseg_1: 15,
+                tseg_2: 4,
+                triple_sample: false,
+            },
+            Self::B1000K => TimingConfig {
+                baud_rate_prescaler: 4,
+                sync_jump_width: 3,
+                tseg_1: 15,
+                tseg_2: 4,
+                triple_sample: false,
+            },
+     */
+    // Calc timing values for 10k baudrate
+    // simply taken from B1000K and multiplied prescaler by 100
+    // weird, doesn't seem to match with the calc!
+    // from pure calc its:
+    // bitrate = f_src  / brp * (1 + prop_seq + tseg1 + tseg2)
+    // but prop_seq is not known here...
+
+    // from https://gitlab.informatik.uni-bremen.de/fbrning/esp-idf/-/blob/v4.3.2/components/hal/include/hal/twai_types.h
+    // #define TWAI_TIMING_CONFIG_10KBITS()    {.brp = 400, .tseg_1 = 15, .tseg_2 = 4, .sjw = 3, .triple_sampling = false}
+    const TWAI_BAUDRATE: twai::BaudRate = twai::BaudRate::Custom(twai::TimingConfig {
+        baud_rate_prescaler: 400, // prescaler
+        sync_jump_width: 3,       // synchronization jump width
+        tseg_1: 15,               // time segment 1
+        tseg_2: 4,                // time segment 2
+        triple_sample: false,
+    });
+    let can_config = twai::TwaiConfiguration::new(
+        peripherals.TWAI0,
+        peripherals.GPIO7,
+        peripherals.GPIO8,
+        TWAI_BAUDRATE,
+        twai::TwaiMode::SelfTest,
+    );
+
     // Spawn parallel tasks
     spawner.spawn(connection(wifi_controller)).unwrap();
     spawner.spawn(net_task(runner)).unwrap();
@@ -284,7 +327,7 @@ async fn main(spawner: Spawner) -> ! {
             peripherals.RSA,
         ))
         .unwrap();
-    spawner.spawn(heating_task(peripherals.TWAI0)).unwrap();
+    spawner.spawn(heating_task(can_config)).unwrap();
 
     // MARK: main loop
     let mut cnt = 0u32;
@@ -565,7 +608,7 @@ async fn cloud_connection_task(
         CONFIG_TOML.hmip_os_version,
         CONFIG_TOML.hmip_accesspoint_id).unwrap_or_default();
 
-        let _get_host_res = single_https_request(
+        let get_host_res = single_https_request(
             reqwless::request::Method::POST,
             CONFIG_TOML.hmip_lookup_host,
             &[
@@ -577,6 +620,12 @@ async fn cloud_connection_task(
             &mut client,
         )
         .await;
+        if get_host_res.is_err() {
+            warn!("Error during getHost request: {:?}", get_host_res.err());
+            // reset URLs
+            *url_rest.borrow_mut() = None;
+            *url_websocket.borrow_mut() = None;
+        }
 
         // do we have a rest url? then open a session to that one:
         if let Some(url_rest) = &*url_rest.borrow() {
@@ -669,6 +718,13 @@ async fn cloud_connection_task(
                 &mut client,
             )
             .await;
+            if _rest_res.is_err() {
+                warn!(
+                    "Error during getCurrentState request: {:?}",
+                    _rest_res.err()
+                );
+                // continuing anyway to try websocket EVENT updates only... ? TODO!
+            }
         } else {
             warn!("No REST URL obtained from getHost, cannot proceed");
         }

@@ -43,6 +43,7 @@ embassy-net = { version = "0.7.0", features = [
   "tcp",
   "udp",
 ] }
+embedded-can = { version = "0.4.1" }
 embedded-io = { version = "0.7.1", features = ["defmt"] }
 embedded-io-async = { version = "0.7.0", features = ["defmt"] }
 embedded-graphics = { version = "0.8.1", features = ["defmt"] }
@@ -99,6 +100,8 @@ serde-json-core = "0.6.0"
 heapless = "0.9.1"
 core-json = "0.4.0"
 embedded-websocket = {version = "0.9.4", default-features = false }
+
+nb ={ version = "1.1.0", features = ["defmt-0-3"]}
 
 # Force reqwless to use your esp-mbedtls fork
 [patch."https://github.com/esp-rs/esp-mbedtls"]

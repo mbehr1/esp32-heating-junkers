@@ -1958,6 +1958,7 @@ dependencies = [
  "embassy-net",
  "embassy-sync 0.7.2",
  "embassy-time 0.5.0",
+ "embedded-can",
  "embedded-graphics",
  "embedded-hal-bus",
  "embedded-io 0.7.1",
@@ -1974,6 +1975,7 @@ dependencies = [
  "heapless 0.9.1",
  "jiff",
  "mipidsi",
+ "nb 1.1.0",
  "panic-rtt-target",
  "rand_core 0.9.3",
  "reqwless",
@@ -2255,6 +2257,9 @@ name = "nb"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
+dependencies = [
+ "defmt 0.3.100",
+]
 
 [[package]]
 name = "nix"
