@@ -7,6 +7,39 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 
+pub fn draw_text_7seg<D>(
+    text: &str,
+    bounding_box: Rectangle,
+    bg_color: Rgb565,
+    text_color: Rgb565,
+    display: &mut D,
+) -> Result<Point, D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    use eg_seven_segment::SevenSegmentStyleBuilder;
+
+    // Clear the background first
+    display.fill_solid(&bounding_box, bg_color)?;
+
+    // Draw the 7-segment representation
+    let style = SevenSegmentStyleBuilder::new()
+        .digit_size(Size::new(20, 30)) // 16x24 ok'ish
+        .digit_spacing(10) // 10px spacing between digits
+        .segment_width(6) // 6px wide segments
+        .segment_color(text_color) // active segments are green
+        .inactive_segment_color(Rgb565::new(
+            text_color.r() / 4,
+            text_color.g() / 4,
+            text_color.b() / 4,
+        ))
+        .build();
+
+    // todo: limit text to fit into bounding box?
+    let position = bounding_box.anchor_point(AnchorPoint::BottomLeft);
+    Text::new(text, position, style).draw(display)
+}
+
 /// Draw text on the display with background clearing
 ///
 /// # Parameters

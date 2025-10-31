@@ -680,6 +680,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "eg-seven-segment"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e7d2f54ed234b333c71865c641906175a0d58bf366534ba5b8ded74b524b87b"
+dependencies = [
+ "bitflags 2.10.0",
+ "embedded-graphics",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -927,6 +937,9 @@ name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+dependencies = [
+ "defmt 0.3.100",
+]
 
 [[package]]
 name = "embedded-hal-async"
@@ -1953,6 +1966,7 @@ dependencies = [
  "core-json",
  "critical-section",
  "defmt 1.0.1",
+ "eg-seven-segment",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
@@ -2234,13 +2248,12 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mipidsi"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ba34dcbf61182ffa6992b5a4d9b566d5a99df127fd93f6d314213347329e92f"
+source = "git+https://github.com/almindor/mipidsi?rev=6661d00#6661d005daebaf00ed3dea003094ec55a77a3cc8"
 dependencies = [
+ "defmt 1.0.1",
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
  "heapless 0.8.0",
- "nb 1.1.0",
 ]
 
 [[package]]

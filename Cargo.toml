@@ -83,12 +83,13 @@ critical-section = "1.2.0"
 rand_core       = "0.9.3"
 static_cell      = "2.1.1"
 
-mipidsi = "0.9.0"
+mipidsi = { version = "0.9.0", default-features = false, features = ["batch", "defmt"], git="https://github.com/almindor/mipidsi", rev="6661d00" }
 axs5106l = "0.1.0"
 
 toml-cfg = "0.2.0"
 
 jiff = {version="0.2.15", default-features = false, features = ["alloc", "static"] }
+eg-seven-segment = "0.2.0"
 
 #reqwless = { version = "0.13", default-features = false, features = ["defmt", "esp-mbedtls"], git="https://github.com/ImplFerris/reqwless", branch="esp-hal-1.0.0" }
 esp-mbedtls = { version="0.1", git="https://github.com/mbehr1/esp-mbedtls", features=["esp32c6", "async"]}

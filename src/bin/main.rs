@@ -54,6 +54,7 @@ use esp_hal::{
     twai,
 };
 use esp_radio::wifi::{ClientConfig, ModeConfig, WifiController, WifiDevice, WifiError};
+use heapless::String;
 use jiff::{
     Timestamp,
     tz::{self, TimeZone},
@@ -72,8 +73,8 @@ use reqwless::client::HttpClient;
 extern crate alloc;
 
 use hzg_roon_junkers::{
-    display_handling::{draw_init_screen, draw_text},
-    heating::heating_task,
+    display_handling::{draw_init_screen, draw_text, draw_text_7seg},
+    heating::{HEATING_TEXT_TO_DISPLAY, heating_task},
     homematic::{
         DEVICES, HMIPHOME, HmIpGetHostResponse, TIMESTAMP_LAST_HMIP_UPDATE, json_process_device,
         json_process_home, single_https_request, websocket_connection,
@@ -192,20 +193,29 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     let display_spi = display_spi.unwrap();
+
+    // TODO Does it make sense to use DMA here?
+    /*
+        let dma_channel = peripherals.DMA_CH0;
+        let (rx_buffers, rx_desc, tx_buffer, tx_desc) = dma_buffers!(2048);
+        let dma_rx_buf = DmaRxBuf::new(rx_desc, rx_buffers).unwrap();
+        let dma_tx_buf = DmaTxBuf::new(tx_desc, tx_buffer).unwrap();
+    */
     let display_spi = display_spi
         .with_sck(peripherals.GPIO1)
-        .with_mosi(peripherals.GPIO2);
+        .with_mosi(peripherals.GPIO2); //      .with_dma(dma_channel)
+    //      .with_buffers(dma_rx_buf, dma_tx_buf);
 
     let spi_device = ExclusiveDevice::new(display_spi, lcd_cs, embassy_time::Delay).unwrap();
 
-    let mut buffer = [0_u8; 512];
+    let mut buffer = [0_u8; 1 * 2048]; // even 20k makes no visible change
 
     let di = SpiInterface::new(spi_device, lcd_dc, &mut buffer);
 
     let mut delay = Delay::new();
     let mut display = Builder::new(ST7789, di)
         .display_size(172, 320)
-        .display_offset(34, 0)
+        .display_offset(34, 0) // framebuffer is 240x320, so offset x by 34 to center 172px wide display // so there is around 20k of "RAM" available :-)
         .color_order(ColorOrder::Bgr)
         .orientation(Orientation::new().flip_horizontal()) // with this the display is higher than wide, upper left is origin, usb connecctor is on the lower side
         .reset_pin(lcd_rst)
@@ -216,6 +226,7 @@ async fn main(spawner: Spawner) -> ! {
         display.size().width,
         display.size().height
     );
+    // no change visible! display.set_tearing_effect(mipidsi::options::TearingEffect::HorizontalAndVertical).unwrap();
 
     // MARK: Init touch axs5106l controller:
     // on i2c shared with IMU QMI8658 (IMU_SDA GPIO18, IMU_SCL GPIO19)
@@ -339,6 +350,8 @@ async fn main(spawner: Spawner) -> ! {
     let mut last_instant_home_update: Instant = Instant::EPOCH;
     let mut last_sum_last_status_update = 0i64;
 
+    let mut last_heating_text = String::<16>::new();
+
     loop {
         //info!("Hello world #{}", cnt);
         Timer::after(Duration::from_millis(40)).await;
@@ -351,8 +364,8 @@ async fn main(spawner: Spawner) -> ! {
 
         if let Some(angle_bg) = angle_bg {
             embedded_graphics::primitives::Arc::new(
-                Point::new(25, 32),
-                40,
+                Point::new(172 - 25, 22),
+                20,
                 angle_bg,
                 if angle_bg - angle_start < 0.0.deg() {
                     angle_bg - angle_start + 360.0.deg()
@@ -360,15 +373,20 @@ async fn main(spawner: Spawner) -> ! {
                     angle_bg - angle_start
                 },
             )
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 2))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLACK, 1))
             .draw(&mut display)
             .unwrap();
         }
 
-        embedded_graphics::primitives::Arc::new(Point::new(25, 32), 40, angle_start, angle_sweep)
-            .into_styled(PrimitiveStyle::with_stroke(Rgb565::GREEN, 2))
-            .draw(&mut display)
-            .unwrap();
+        embedded_graphics::primitives::Arc::new(
+            Point::new(172 - 25, 22),
+            20,
+            angle_start,
+            angle_sweep,
+        )
+        .into_styled(PrimitiveStyle::with_stroke(Rgb565::BLUE, 1))
+        .draw(&mut display)
+        .unwrap();
         angle_bg = Some(angle_start);
 
         if let Ok(Some(touches)) = touch_driver.get_touch_data() {
@@ -389,8 +407,28 @@ async fn main(spawner: Spawner) -> ! {
             last_stack_ipv4_addr = ipv4_addr;
         }
 
+        if cnt % 200 == 180 {
+            // every  0.4s (as text might be updated every 1s)
+            HEATING_TEXT_TO_DISPLAY.lock(|heating_text| {
+                let (heating_text, text_color, bg_color) = &*heating_text.borrow();
+                if !(heating_text.cmp(&last_heating_text) == core::cmp::Ordering::Equal) {
+                    last_heating_text.clear();
+                    last_heating_text.push_str(heating_text.as_str()).unwrap();
+                    let text_area = Rectangle::new(Point::new(5, 100), Size::new(160, 30));
+                    let _ = draw_text_7seg(
+                        heating_text.as_str(),
+                        text_area,
+                        *bg_color,
+                        *text_color,
+                        &mut display,
+                    );
+                }
+            });
+        }
+
         // check for home/weather updates
         if cnt % 1000 == 400 {
+            // every 2s
             HMIPHOME.lock(|hmiphome| {
                 if let Some(home) = &*hmiphome.borrow() {
                     if last_instant_home_update != home.uptime_last_update {
@@ -429,6 +467,7 @@ async fn main(spawner: Spawner) -> ! {
 
         // compare last_timestamp_hmip_update and update display if changed
         if cnt % 1000 == 500 {
+            // every 2s
             let mut tdp_did_change = false;
             TIMESTAMP_LAST_HMIP_UPDATE.lock(|tsp| {
                 let tsp_borrow = tsp.borrow();
@@ -465,6 +504,7 @@ async fn main(spawner: Spawner) -> ! {
 
         // show list of devices on screen: (only if updates... detect via last_status_update max value)
         if cnt % 1000 == 0 {
+            // every 2s
             DEVICES.lock(|devices| {
                 let devices = devices.borrow();
                 let sum_last_status_update: i64 =

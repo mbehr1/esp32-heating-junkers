@@ -12,14 +12,17 @@
 /// [x] - consider HT being close to target temp and reduce heating need accordingly?
 /// [] - disable CAN controller to allow CONFIG_PM_ENABLE / sleep modes to work? (e.g. if we dont expect to send anything for a while)
 ///
+use core::{cell::RefCell, fmt::Write};
 use defmt::{debug, info, warn};
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_can::{Frame, Id};
+use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
 use esp_hal::{
     Blocking,
     twai::{self, StandardId},
 };
-use heapless::Vec;
+use heapless::{String, Vec};
 // use embedded_can::Frame;
 
 use crate::homematic::DEVICES;
@@ -179,6 +182,29 @@ sends the following frames:
    - 0x256 "current time" (DOW HH MM SS)
   */
 
+/// state from the junkers heating controller
+/// only data we did receive
+
+#[derive(Debug, Default)]
+struct HeaterState {
+    cur_heat_supply_temp_celsius: f32,
+    max_heat_supply_temp_celsius: f32,
+    cur_ww_supply_temp_celsius: f32,
+    max_ww_supply_temp_celsius: f32,
+    //cur_outside_temp_celsius: f32,
+    cur_burner_on: bool,
+    cur_heat_pump_on: bool,
+
+    err_msg: u8, // only the last one for now, 0x00 = ok
+}
+
+/// target control values to send to the heating controller
+#[derive(Debug, Default)]
+struct HeaterControl {
+    target_supply_temp_raw: u8, // in 0.5°C steps
+    heat_pump_eco_mode: u8,
+}
+
 // we use a BinarySortedHeap for the CAN TX queue.
 // sort by next transmit time (earliest first).
 // if we do update an existing entry, we remove and re-insert it with "now" as next transmit time to get fast update of changes.
@@ -210,6 +236,12 @@ impl Ord for CanTxEntry {
     }
 }
 
+// data for display: text, text color, background color
+pub static HEATING_TEXT_TO_DISPLAY: Mutex<
+    CriticalSectionRawMutex,
+    RefCell<(String<16>, Rgb565, Rgb565)>,
+> = Mutex::new(RefCell::new((String::new(), Rgb565::GREEN, Rgb565::BLACK)));
+
 #[embassy_executor::task]
 pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, Blocking>) {
     info!("task 'heating_task' running...");
@@ -227,9 +259,14 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
     let mut can = can_config.start();
     can.clear_receive_fifo();
 
+    // state of the heater
+    let mut heater_state = HeaterState::default();
+
     // target values towards the heating controller:
-    let mut last_target_supply_temp_raw: u8 = 20; // 10°C as default
-    let mut last_heat_pump_eco_mode: u8 = 1; // pump off as default
+    let mut heater_control = HeaterControl {
+        target_supply_temp_raw: 20, // 10°C as default
+        heat_pump_eco_mode: 1,      // pump off as default
+    };
 
     // put the initial periodic frames into the tx queue:
 
@@ -252,7 +289,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
     tx_queue
         .push(CanTxEntry {
             id: CF_HEAT_PUMP_ECO_MODE,
-            data: Vec::from_slice(&[last_heat_pump_eco_mode]).unwrap(), // TODO default off??? (depend on e.g. outside temp? What if no data is available?)
+            data: Vec::from_slice(&[heater_control.heat_pump_eco_mode]).unwrap(), // TODO default off??? (depend on e.g. outside temp? What if no data is available?)
             next_tx: embassy_time::Instant::now() + Duration::from_secs(7),
             cycle_time: Duration::from_secs(30),
         })
@@ -260,7 +297,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
     tx_queue
         .push(CanTxEntry {
             id: CF_HEAT_TARGET_SUPPLY_TEMP,
-            data: Vec::from_slice(&[last_target_supply_temp_raw]).unwrap(), // 10°C as default -> off (first eval below will update)
+            data: Vec::from_slice(&[heater_control.target_supply_temp_raw]).unwrap(), // 10°C as default -> off (first eval below will update)
             next_tx: embassy_time::Instant::now() + Duration::from_secs(8),
             cycle_time: Duration::from_secs(30),
         })
@@ -276,6 +313,8 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
         let heating_need_perc = calc_heating_needs(); // TODO no need to do this so often. Every 2s is enough...
         debug!("Calculated heating need: {}%", heating_need_perc);
 
+        update_display(&mut heater_state, &heater_control);
+
         // map it to two values:
         // heat needed? (heating_need_perc > 0)
         let heat_pump_eco_mode = if heating_need_perc > 0 { 0 } else { 1 };
@@ -286,8 +325,8 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
             10.0 // treated as off
         };
         let target_supply_temp_raw = (target_supply_temp_celsius * 2.0) as u8; // in 0.5°C steps
-        if target_supply_temp_raw != last_target_supply_temp_raw
-            || heat_pump_eco_mode != last_heat_pump_eco_mode
+        if target_supply_temp_raw != heater_control.target_supply_temp_raw
+            || heat_pump_eco_mode != heater_control.heat_pump_eco_mode
         {
             info!(
                 "Heating need: {}%, heat_needed: {}, target_supply_temp: {} °C (raw: {})",
@@ -296,13 +335,10 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                 target_supply_temp_celsius,
                 target_supply_temp_raw
             );
-            update_target_values_in_tx_queue(
-                &mut tx_queue,
-                target_supply_temp_raw,
-                heat_pump_eco_mode,
-            );
-            last_target_supply_temp_raw = target_supply_temp_raw;
-            last_heat_pump_eco_mode = heat_pump_eco_mode;
+            heater_control.target_supply_temp_raw = target_supply_temp_raw;
+            heater_control.heat_pump_eco_mode = heat_pump_eco_mode;
+
+            update_target_values_in_tx_queue(&mut tx_queue, &heater_control);
         }
 
         // first receive any available frames:
@@ -313,6 +349,41 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                     info!("Received CAN frame: {}", defmt::Debug2Format(&frame));
                     let data = frame.data();
                     match frame.id() {
+                        Id::Standard(id) if matches!(id.as_raw(), CF_ERROR_MESSAGES) => {
+                            if data.len() >= 1 {
+                                let err_msg = data[0];
+                                info!("rcvd: Störungsmeldung: 0x{:02X}", err_msg);
+                                heater_state.err_msg = err_msg;
+                                // store time or e.g. history as well?
+                            }
+                        }
+                        Id::Standard(id)
+                            if matches!(
+                                id.as_raw(),
+                                CF_CUR_BURNER_STATUS | CF_HEAT_CUR_PUMP_STATUS
+                            ) =>
+                        {
+                            if data.len() >= 1 {
+                                let status = data[0] != 0;
+                                match id.as_raw() {
+                                    CF_CUR_BURNER_STATUS => {
+                                        info!(
+                                            "rcvd: Aktueller Brennerstatus: {}",
+                                            if status { "AN" } else { "AUS" }
+                                        );
+                                        heater_state.cur_burner_on = status;
+                                    }
+                                    CF_HEAT_CUR_PUMP_STATUS => {
+                                        info!(
+                                            "rcvd: Aktueller Heizungspumpenstatus: {}",
+                                            if status { "AN" } else { "AUS" }
+                                        );
+                                        heater_state.cur_heat_pump_on = status;
+                                    }
+                                    _ => (),
+                                }
+                            }
+                        }
                         Id::Standard(id)
                             if matches!(
                                 id.as_raw(),
@@ -327,16 +398,20 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                                 let temp_celsius = (cur_temp_raw as f32) / 2.0;
                                 match id.as_raw() {
                                     CF_HEAT_MAX_SUPPLY_TEMP => {
-                                        info!("rcvd: Max Vorlauftemp Hzg: {} °C", temp_celsius)
+                                        info!("rcvd: Max Vorlauftemp Hzg: {} °C", temp_celsius);
+                                        heater_state.max_heat_supply_temp_celsius = temp_celsius;
                                     }
                                     CF_HEAT_CUR_SUPPLY_TEMP => {
-                                        info!("rcvd: Akt Vorlauftemp Hzg: {} °C", temp_celsius)
+                                        info!("rcvd: Akt Vorlauftemp Hzg: {} °C", temp_celsius);
+                                        heater_state.cur_heat_supply_temp_celsius = temp_celsius;
                                     }
                                     CF_WW_MAX_SUPPLY_TEMP => {
-                                        info!("rcvd: Max Vorlauftemp WW: {} °C", temp_celsius)
+                                        info!("rcvd: Max Vorlauftemp WW: {} °C", temp_celsius);
+                                        heater_state.max_ww_supply_temp_celsius = temp_celsius;
                                     }
                                     CF_WW_CUR_SUPPLY_TEMP => {
-                                        info!("rcvd: Akt Vorlauftemp WW: {} °C", temp_celsius)
+                                        info!("rcvd: Akt Vorlauftemp WW: {} °C", temp_celsius);
+                                        heater_state.cur_ww_supply_temp_celsius = temp_celsius;
                                     }
                                     _ => (),
                                 }
@@ -406,32 +481,159 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
         // wait a bit, there is so little traffic on the bus that we can wait a lot longer...
         Timer::after(Duration::from_millis(250)).await;
     }
-    let _ = can.stop();
+    // let _ = can.stop();
     // warn!("end heating_task");
+}
+
+/// Update the display data with current target values
+///
+/// We toggle the following infos:
+/// - if there is an error, show "E xx" every 2s for 1s
+/// - If the pump is off (eco mode), show "H. AUS", cyclically
+/// - If the pump is on, show the target supply temp, cyclically
+/// - Show the burner status "B. ON" and pump status ("P. ON"), cyclically
+/// - Show the current water temp as well "W xx.x°C", cyclically
+
+// the logic is realized by a simple state machine via:
+// a list that gets cycled through every 1s
+// list items: ERROR, PUMP_STATE, ERROR, BURNER_STATE, ERROR, TARGET_TEMP, ERROR, WATER_TEMP
+// error is skipped if no error
+
+enum DisplayState {
+    Error,
+    PumpState,
+    BurnerState,
+    TargetTemp,
+    WaterTemp,
+}
+
+const DISPLAY_LIST: [DisplayState; 8] = [
+    DisplayState::Error,
+    DisplayState::PumpState,
+    DisplayState::Error,
+    DisplayState::BurnerState,
+    DisplayState::Error,
+    DisplayState::TargetTemp,
+    DisplayState::Error,
+    DisplayState::WaterTemp,
+];
+
+fn update_display(heater_state: &mut HeaterState, heater_control: &HeaterControl) {
+    static mut NEXT_DISPLAY_STATE_CHANGE: Instant = Instant::from_ticks(0);
+    static mut CURRENT_DISPLAY_LIST_IDX: usize = 0;
+
+    // next update time?
+    let now = Instant::now();
+    if now < unsafe { NEXT_DISPLAY_STATE_CHANGE } {
+        return;
+    }
+    // update next change time
+    unsafe {
+        let old_idx = CURRENT_DISPLAY_LIST_IDX;
+        NEXT_DISPLAY_STATE_CHANGE = now + Duration::from_secs(2);
+
+        CURRENT_DISPLAY_LIST_IDX = (CURRENT_DISPLAY_LIST_IDX + 1) % DISPLAY_LIST.len();
+        // skip next error state if no error
+        let is_err = matches!(DISPLAY_LIST[CURRENT_DISPLAY_LIST_IDX], DisplayState::Error);
+        let has_err = heater_state.err_msg != 0;
+        if is_err && !has_err {
+            CURRENT_DISPLAY_LIST_IDX = (CURRENT_DISPLAY_LIST_IDX + 1) % DISPLAY_LIST.len();
+        }
+        // info!("Display state changed: {} -> {}, is_err: {}, has err: {}", old_idx, CURRENT_DISPLAY_LIST_IDX, is_err && !has_err, has_err);
+    }
+
+    HEATING_TEXT_TO_DISPLAY.lock(|htd| {
+        let mut htd = htd.borrow_mut();
+        htd.0.clear();
+        match DISPLAY_LIST[unsafe { CURRENT_DISPLAY_LIST_IDX }] {
+            DisplayState::Error => {
+                if heater_state.err_msg != 0 {
+                    let _ = core::write!(htd.0, "E. {:02X}", heater_state.err_msg);
+                    htd.1 = Rgb565::YELLOW;
+                    htd.2 = Rgb565::BLACK;
+                }
+            }
+            DisplayState::PumpState => {
+                let _ = core::write!(
+                    htd.0,
+                    "H. {}",
+                    if heater_state.cur_heat_pump_on {
+                        "AN"
+                    } else {
+                        "AUS"
+                    }
+                );
+                htd.1 = if heater_state.cur_heat_pump_on {
+                    Rgb565::GREEN
+                } else {
+                    Rgb565::BLUE
+                };
+                htd.2 = Rgb565::BLACK;
+            }
+            DisplayState::BurnerState => {
+                let _ = core::write!(
+                    htd.0,
+                    "F. {}",
+                    if heater_state.cur_burner_on {
+                        "AN"
+                    } else {
+                        "AUS"
+                    }
+                );
+                htd.1 = if heater_state.cur_burner_on {
+                    Rgb565::RED
+                } else {
+                    Rgb565::BLUE
+                };
+                htd.2 = Rgb565::BLACK;
+            }
+            DisplayState::TargetTemp => {
+                let _ = core::write!(
+                    htd.0,
+                    "{:.1}°C",
+                    heater_control.target_supply_temp_raw as f32 * 0.5
+                );
+                htd.1 = if heater_control.target_supply_temp_raw as f32 * 0.5 < 20.0 {
+                    Rgb565::BLUE
+                } else {
+                    Rgb565::RED
+                };
+                htd.2 = Rgb565::BLACK;
+            }
+            DisplayState::WaterTemp => {
+                let _ = core::write!(
+                    htd.0,
+                    "L. {:>2.0}°C",
+                    heater_state.cur_ww_supply_temp_celsius
+                );
+                htd.1 = Rgb565::BLUE;
+                htd.2 = Rgb565::BLACK;
+            }
+        }
+    });
 }
 
 fn update_target_values_in_tx_queue(
     tx_queue: &mut heapless::BinaryHeap<CanTxEntry, heapless::binary_heap::Min, 8>,
-    target_supply_temp_raw: u8,
-    heat_pump_eco_mode: u8,
+    heater_control: &HeaterControl,
 ) {
     // remove existing entries and re-insert with updated values and next_tx = now
     let mut new_queue: heapless::BinaryHeap<CanTxEntry, heapless::binary_heap::Min, 8> =
         heapless::BinaryHeap::new();
     while let Some(mut entry) = tx_queue.pop() {
         if entry.id == CF_HEAT_TARGET_SUPPLY_TEMP {
-            entry.data = Vec::from_slice(&[target_supply_temp_raw]).unwrap();
+            entry.data = Vec::from_slice(&[heater_control.target_supply_temp_raw]).unwrap();
             entry.next_tx = embassy_time::Instant::now();
             info!(
                 "Updated target supply temp in tx queue to raw value: {}",
-                target_supply_temp_raw
+                heater_control.target_supply_temp_raw
             );
         } else if entry.id == CF_HEAT_PUMP_ECO_MODE {
-            entry.data = Vec::from_slice(&[heat_pump_eco_mode]).unwrap();
+            entry.data = Vec::from_slice(&[heater_control.heat_pump_eco_mode]).unwrap();
             entry.next_tx = embassy_time::Instant::now();
             info!(
                 "Updated heat pump eco mode in tx queue to: {}",
-                heat_pump_eco_mode
+                heater_control.heat_pump_eco_mode
             );
         }
         new_queue.push(entry).unwrap();
