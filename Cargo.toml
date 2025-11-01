@@ -90,6 +90,7 @@ toml-cfg = "0.2.0"
 
 jiff = {version="0.2.15", default-features = false, features = ["alloc", "static"] }
 eg-seven-segment = "0.2.0"
+embedded-charts = { version = "0.3.0", default-features = false, features = ["line", "no_std", "animations"] }
 
 #reqwless = { version = "0.13", default-features = false, features = ["defmt", "esp-mbedtls"], git="https://github.com/ImplFerris/reqwless", branch="esp-hal-1.0.0" }
 esp-mbedtls = { version="0.1", git="https://github.com/mbehr1/esp-mbedtls", features=["esp32c6", "async"]}

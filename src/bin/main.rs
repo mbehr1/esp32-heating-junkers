@@ -6,6 +6,7 @@
 // [] detect USB/JTAG and show "debug infos"?
 // [] handle devices becoming stale, removed from event updates, not reachable...
 // [] OTA update support
+// [] manual override of heating settings via touch display
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
 // [] turn display orientation according to inertia sensor
 // [x] use hw accel esp-mbedtls with reqwless
@@ -32,10 +33,10 @@ use defmt::{debug, info, warn};
 use embassy_executor::Spawner;
 use embassy_net::{DhcpConfig, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
+use embedded_charts::prelude::*;
 use embedded_graphics::{
     geometry::AnchorPoint,
     pixelcolor::Rgb565,
-    prelude::*,
     primitives::{PrimitiveStyle, Rectangle},
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -74,7 +75,7 @@ extern crate alloc;
 
 use hzg_roon_junkers::{
     display_handling::{draw_init_screen, draw_text, draw_text_7seg},
-    heating::{HEATING_TEXT_TO_DISPLAY, heating_task},
+    heating::{HEATER_CONTROL, HEATING_TEXT_TO_DISPLAY, heating_task},
     homematic::{
         DEVICES, HMIPHOME, HmIpGetHostResponse, TIMESTAMP_LAST_HMIP_UPDATE, json_process_device,
         json_process_home, single_https_request, websocket_connection,
@@ -151,7 +152,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
 
     // RAM 512kb...
-    esp_alloc::heap_allocator!(size: 180 /*72*/ * 1024); // 100kb roughly for TLS1.2..., 100kb for json responses
+    esp_alloc::heap_allocator!(size: 170 /*72*/ * 1024); // 100kb roughly for TLS1.2..., 100kb for json responses
     esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 65536); // How much heap do we got?
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -208,9 +209,9 @@ async fn main(spawner: Spawner) -> ! {
 
     let spi_device = ExclusiveDevice::new(display_spi, lcd_cs, embassy_time::Delay).unwrap();
 
-    let mut buffer = [0_u8; 1 * 2048]; // even 20k makes no visible change
+    let mut buffer = alloc::boxed::Box::new([0_u8; 1 * 2048]); // even 20k makes no visible change
 
-    let di = SpiInterface::new(spi_device, lcd_dc, &mut buffer);
+    let di = SpiInterface::new(spi_device, lcd_dc, buffer.as_mut_slice());
 
     let mut delay = Delay::new();
     let mut display = Builder::new(ST7789, di)
@@ -352,6 +353,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut last_heating_text = String::<16>::new();
 
+    // we're short on stack? so better allocate on heap
+    let mut ht_cur_temp_data: alloc::vec::Vec<SlidingWindowSeries<Point2D, 144>> =
+        alloc::vec::Vec::with_capacity(6); // TODO const same len as DEVICES...
+    let mut ht_control_data: SlidingWindowSeries<Point2D, 144> = SlidingWindowSeries::new();
+
     loop {
         //info!("Hello world #{}", cnt);
         Timer::after(Duration::from_millis(40)).await;
@@ -405,6 +411,80 @@ async fn main(spawner: Spawner) -> ! {
         if last_stack_ipv4_addr != ipv4_addr {
             info!("Network IPv4 address changed: {}", ipv4_addr);
             last_stack_ipv4_addr = ipv4_addr;
+        }
+
+        // update the graph every sec:
+        if cnt % 500 == 40 {
+            let chart_ht_temps =
+                LineChart::builder()
+                    .line_color(Rgb565::BLUE)
+                    .line_width(1)
+                    .with_y_axis(
+                        LinearAxis::new(15.0, 25.0, AxisOrientation::Vertical, AxisPosition::Left)
+                            .with_style(AxisStyle::minimal().with_grid_lines(
+                                LineStyle::dotted(Rgb565::CSS_LIGHT_GRAY).width(1),
+                            )),
+                    )
+                    .build()
+                    .unwrap();
+            let chart_hc_temp = LineChart::builder()
+                .line_color(Rgb565::CSS_ORANGE_RED)
+                .line_width(1)
+                .with_y_axis(
+                    LinearAxis::new(10.0, 70.0, AxisOrientation::Vertical, AxisPosition::Left)
+                        .with_style(AxisStyle::minimal()),
+                )
+                .build()
+                .unwrap();
+            let chart_area = Rectangle::new(Point::new(2, 30), Size::new(168, 60));
+
+            // every 10mins we push a new point, so for 24hs we need 144 points
+            // data.push(Point2D::new(0.0, 10.0)).unwrap();
+            const UPDATE_FREQ: u32 = 200; // secs TODO: change back to 10mins (60*10) (200s = 8h for 144 points)
+            if cnt % (500 * UPDATE_FREQ) == 40 {
+                // every UPDATE_FREQ mins
+                DEVICES.lock(|devices| {
+                    let devices = devices.borrow();
+                    for (i, device) in devices.iter().enumerate() {
+                        if ht_cur_temp_data.len() < i + 1 {
+                            // might add chart label,... here as well
+                            ht_cur_temp_data.push(SlidingWindowSeries::new());
+                        }
+                        ht_cur_temp_data[i].push(Point2D::new(
+                            (cnt / (500 * UPDATE_FREQ)) as f32,
+                            device.valve_act_temp as f32,
+                        ));
+                    }
+                });
+                HEATER_CONTROL.lock(|hc| {
+                    let hc = hc.borrow();
+                    ht_control_data.push(Point2D::new(
+                        (cnt / (500 * UPDATE_FREQ)) as f32,
+                        hc.target_supply_temp_celsius(),
+                    ));
+                });
+
+                let config: ChartConfig<Rgb565> = ChartConfig::default();
+                let _ = ChartRenderer::clear_area(chart_area, Rgb565::BLACK, &mut display);
+                for temp_data in ht_cur_temp_data.iter() {
+                    let data = temp_data;
+                    // sadly we do need to copy the data into a StaticDataSeries as LineChart.draw needs that...
+                    let mut chart_data_tmp = StaticDataSeries::<Point2D, 256>::new();
+                    for point in data.iter() {
+                        let _ = chart_data_tmp.push(point);
+                    }
+                    let _ = chart_ht_temps.draw(&chart_data_tmp, &config, chart_area, &mut display);
+                }
+                // draw control temp as well
+                {
+                    let data = &ht_control_data;
+                    let mut chart_data_tmp = StaticDataSeries::<Point2D, 256>::new();
+                    for point in data.iter() {
+                        let _ = chart_data_tmp.push(point);
+                    }
+                    let _ = chart_hc_temp.draw(&chart_data_tmp, &config, chart_area, &mut display);
+                }
+            }
         }
 
         if cnt % 200 == 180 {

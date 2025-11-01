@@ -419,8 +419,8 @@ where
 
         // loop until connection closed
         // TODO: most frames are a lot smaller (7kb, 10kb), ignore big ones...
-        let mut frame_buffer = heapless::Vec::<u8, { 80 * 1024 }>::new(); // lets hope the events fit into 80kb
-        frame_buffer.resize_default(80 * 1024).unwrap();
+        let mut frame_buffer = heapless::Vec::<u8, { 40 * 1024 }>::new(); // lets hope the events fit into 40kb
+        frame_buffer.resize_default(40 * 1024).unwrap();
         let mut frame_buffer_used = 0usize;
 
         let mut rx_buffer = heapless::Vec::<u8, 4096>::new();
@@ -525,7 +525,7 @@ where
                                     defmt::Debug2Format(&rx_buffer[..rx_buffer_used])
                                 );
                                 if read == 0 {
-                                    // no more data to read, might have garbage?
+                                    // no more data to read, might have garbage? (or frame too large?)
                                     rx_buffer_used = 0;
                                 }
                             }

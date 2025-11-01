@@ -84,7 +84,7 @@ const CF_WW_CUR_SUPPLY_TEMP: u16 = 0x205; // current allowed supply temp, 1 data
 const CF_ERROR_MESSAGES: u16 = 0x206; // error messages, 1 data byte, hex value see manual, 00=heating ok
 
 /// aktuell Außentemperatur
-const CF_CUR_OUTSIDE_TEMP: u16 = 0x207; // current outside temp, 2 data bytes in 0.01 °C steps (signed), eg 0x07E2=2018=20,18°C
+// const CF_CUR_OUTSIDE_TEMP: u16 = 0x207; // current outside temp, 2 data bytes in 0.01 °C steps (signed), eg 0x07E2=2018=20,18°C
 
 /// 0x208 -> unknown... (im Log nur 0x01)
 
@@ -114,10 +114,10 @@ const CF_HEAT_PUMP_ECO_MODE: u16 = 0x253; // heating pump control, 1 data byte, 
 /// Vorlauftemperatur Warmwasser Sollwert (we need to send it)
 ///
 /// 10°C -> treated as off
-const CF_WW_TARGET_SUPPLY_TEMP: u16 = 0x255; // target value for supply temp, 1 data byte (0.5 °C steps)
+// const CF_WW_TARGET_SUPPLY_TEMP: u16 = 0x255; // target value for supply temp, 1 data byte (0.5 °C steps)
 
 /// current time frame (we can send it periodically, but no need)
-const CF_CUR_TIME: u16 = 0x256; // current time frame, 4 data bytes DOW (N = ISO-8601 numeric representation of the day of the week. (1 = Monday, 7 = Sunday)) HH MM 4:  6 9 27 4 = Sat 09:27
+// const CF_CUR_TIME: u16 = 0x256; // current time frame, 4 data bytes DOW (N = ISO-8601 numeric representation of the day of the week. (1 = Monday, 7 = Sunday)) HH MM 4:  6 9 27 4 = Sat 09:27
 
 const CF_TR_OUTSIDE_TEMP_CTRL: u16 = 0x258; // TR outside temperature control, 1 data byte, 00=room thermostat, 01=weather compensated control
 
@@ -199,10 +199,16 @@ struct HeaterState {
 }
 
 /// target control values to send to the heating controller
-#[derive(Debug, Default)]
-struct HeaterControl {
+#[derive(Debug, Default, Clone)]
+pub struct HeaterControl {
     target_supply_temp_raw: u8, // in 0.5°C steps
     heat_pump_eco_mode: u8,
+}
+
+impl HeaterControl {
+    pub fn target_supply_temp_celsius(&self) -> f32 {
+        (self.target_supply_temp_raw as f32) * 0.5
+    }
 }
 
 // we use a BinarySortedHeap for the CAN TX queue.
@@ -242,6 +248,12 @@ pub static HEATING_TEXT_TO_DISPLAY: Mutex<
     RefCell<(String<16>, Rgb565, Rgb565)>,
 > = Mutex::new(RefCell::new((String::new(), Rgb565::GREEN, Rgb565::BLACK)));
 
+pub static HEATER_CONTROL: Mutex<CriticalSectionRawMutex, RefCell<HeaterControl>> =
+    Mutex::new(RefCell::new(HeaterControl {
+        target_supply_temp_raw: 20, // 10°C as default
+        heat_pump_eco_mode: 1,      // pump off as default
+    }));
+
 #[embassy_executor::task]
 pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, Blocking>) {
     info!("task 'heating_task' running...");
@@ -263,6 +275,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
     let mut heater_state = HeaterState::default();
 
     // target values towards the heating controller:
+    // we use a local variable here and update the global only when something changes
     let mut heater_control = HeaterControl {
         target_supply_temp_raw: 20, // 10°C as default
         heat_pump_eco_mode: 1,      // pump off as default
@@ -313,8 +326,6 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
         let heating_need_perc = calc_heating_needs(); // TODO no need to do this so often. Every 2s is enough...
         debug!("Calculated heating need: {}%", heating_need_perc);
 
-        update_display(&mut heater_state, &heater_control);
-
         // map it to two values:
         // heat needed? (heating_need_perc > 0)
         let heat_pump_eco_mode = if heating_need_perc > 0 { 0 } else { 1 };
@@ -324,6 +335,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
         } else {
             10.0 // treated as off
         };
+
         let target_supply_temp_raw = (target_supply_temp_celsius * 2.0) as u8; // in 0.5°C steps
         if target_supply_temp_raw != heater_control.target_supply_temp_raw
             || heat_pump_eco_mode != heater_control.heat_pump_eco_mode
@@ -338,8 +350,14 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
             heater_control.target_supply_temp_raw = target_supply_temp_raw;
             heater_control.heat_pump_eco_mode = heat_pump_eco_mode;
 
+            HEATER_CONTROL.lock(|hc| {
+                *hc.borrow_mut() = heater_control.clone();
+            });
+
             update_target_values_in_tx_queue(&mut tx_queue, &heater_control);
         }
+
+        update_display(&mut heater_state, &heater_control);
 
         // first receive any available frames:
         while can.num_available_messages() > 0 {
@@ -529,7 +547,7 @@ fn update_display(heater_state: &mut HeaterState, heater_control: &HeaterControl
     }
     // update next change time
     unsafe {
-        let old_idx = CURRENT_DISPLAY_LIST_IDX;
+        // let old_idx = CURRENT_DISPLAY_LIST_IDX;
         NEXT_DISPLAY_STATE_CHANGE = now + Duration::from_secs(2);
 
         CURRENT_DISPLAY_LIST_IDX = (CURRENT_DISPLAY_LIST_IDX + 1) % DISPLAY_LIST.len();
@@ -699,7 +717,7 @@ fn calc_heating_needs() -> u16 {
             total_valve_position += (device.valve_position * 100.0) as u16;
         }
         if devices.is_empty() {
-            warn!("No devices found for heating calculation!");
+            // warn!("No devices found for heating calculation!");
             0
         } else {
             total_valve_position / devices.len() as u16
