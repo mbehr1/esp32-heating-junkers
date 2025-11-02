@@ -7,8 +7,8 @@
 // [] handle devices becoming stale, removed from event updates, not reachable...
 // [] OTA update support
 // [] manual override of heating settings via touch display
+// [] update to esp-hal 1.0.0
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
-// [] turn display orientation according to inertia sensor
 // [x] use hw accel esp-mbedtls with reqwless
 // [x] reconnect to wifi after link down,... (weirld with Static and then not dhcp...?)
 // [] lp core for e.g. watchdog / configure rtc for watchdog
@@ -152,7 +152,7 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
 
     // RAM 512kb...
-    esp_alloc::heap_allocator!(size: 170 /*72*/ * 1024); // 100kb roughly for TLS1.2..., 100kb for json responses
+    esp_alloc::heap_allocator!(size: 160 /*72*/ * 1024); // 100kb roughly for TLS1.2..., 100kb for json responses
     esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 65536); // How much heap do we got?
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -975,6 +975,7 @@ async fn cloud_connection_task(
 async fn connection(mut controller: WifiController<'static>) {
     info!("task 'connection' running...");
     info!("Device capabilities: {:?}", controller.capabilities());
+    let mut was_connected_once = false;
     loop {
         match controller.is_connected() {
             Ok(true) => {
@@ -1009,9 +1010,19 @@ async fn connection(mut controller: WifiController<'static>) {
         info!("About to connect...");
 
         match controller.connect_async().await {
-            Ok(_) => info!("Wifi connected!"),
+            Ok(_) => {
+                info!("Wifi connected!");
+                was_connected_once = true;
+            }
             Err(e) => {
                 info!("Failed to connect to wifi: {:?}", e);
+                // lets stop controller here and try again:
+                if !was_connected_once{ // TODO or if we do loop here for e.g. 1min? difficult to test...
+                    info!("Stopping wifi controller to retry...");
+                    if let Err(e) = controller.stop_async().await {
+                        warn!("Failed to stop wifi controller: {:?}", e);
+                    }
+                }
                 Timer::after(Duration::from_millis(5000)).await
             }
         }
