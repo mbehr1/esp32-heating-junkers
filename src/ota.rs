@@ -228,7 +228,9 @@ where
 
     // start updating the inactive partition
     info!("Starting OTA update to inactive partition...");
-    let _ = socket.write(b"INFO: Starting OTA update to inactive partition...\n").await;
+    let _ = socket
+        .write(b"INFO: Starting OTA update to inactive partition...\n")
+        .await;
     if let Ok((mut next_app_partition, part_type)) = ota.next_partition() {
         let part_size = next_app_partition.partition_size();
         info!(
@@ -281,7 +283,9 @@ where
                 return Err(embassy_net::tcp::Error::ConnectionReset);
             }
             let _ = socket.write(b"INFO: Processing segment ").await;
-            let _ = socket.write(alloc::format!("{} len: {}\n", seg_idx + 1, seg_header.data_len).as_bytes()).await;
+            let _ = socket
+                .write(alloc::format!("{} len: {}\n", seg_idx + 1, seg_header.data_len).as_bytes())
+                .await;
             info!(
                 "Segment header: load_addr=0x{:08x}, data_len={}",
                 seg_header.load_addr, seg_header.data_len

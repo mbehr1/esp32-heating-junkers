@@ -8,6 +8,8 @@
 // [x] OTA update support
 // [] log via tcp
 // [] manual override of heating settings via touch display
+// [] fix [WARN ] Error during getCurrentState request: Some(Tls("MbedTlsError(-30592)")) (hzg_roon_junkers src/bin/main.rs:866) 0x7780
+// [] custom bootloader with app rollback support. (specify new in in idf bootloader espflash.toml, https://github.com/espressif/esp-idf/tree/master/components/bootloader, https://danielmangum.com/posts/risc-v-bytes-exploring-custom-esp32-bootloader/...)
 // [] update to esp-hal 1.0.0
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
 // [x] use hw accel esp-mbedtls with reqwless
@@ -165,6 +167,41 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
     info!("Embassy initialized!");
+
+    info!(
+        "Reset reason: {:?}",
+        defmt::Debug2Format(&esp_hal::rtc_cntl::reset_reason(
+            esp_hal::system::Cpu::ProCpu
+        ))
+    );
+
+    // configure watchdog (Rwdt)
+    let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
+    let mut wdt = rtc.rwdt;
+    wdt.set_stage_action(
+        esp_hal::rtc_cntl::RwdtStage::Stage0,
+        esp_hal::rtc_cntl::RwdtStageAction::Off,
+    );
+    wdt.set_stage_action(
+        esp_hal::rtc_cntl::RwdtStage::Stage1,
+        esp_hal::rtc_cntl::RwdtStageAction::Off,
+    );
+    wdt.set_stage_action(
+        esp_hal::rtc_cntl::RwdtStage::Stage2,
+        esp_hal::rtc_cntl::RwdtStageAction::Off,
+    );
+    wdt.set_stage_action(
+        esp_hal::rtc_cntl::RwdtStage::Stage3,
+        esp_hal::rtc_cntl::RwdtStageAction::ResetSystem,
+    );
+    wdt.set_timeout(
+        esp_hal::rtc_cntl::RwdtStage::Stage3,
+        esp_hal::time::Duration::from_secs(2),
+    ); // 2s timeout for final stage
+    wdt.enable();
+    //let mut swd = rtc.swd;
+    // swd.enable();
+    // set_write_protection?
 
     // MARK: init display
 
@@ -362,8 +399,8 @@ async fn main(spawner: Spawner) -> ! {
     let mut ht_cur_temp_data: alloc::vec::Vec<SlidingWindowSeries<Point2D, 144>> =
         alloc::vec::Vec::with_capacity(6); // TODO const same len as DEVICES...
     let mut ht_control_data: SlidingWindowSeries<Point2D, 144> = SlidingWindowSeries::new();
-
     loop {
+        wdt.feed(); // feed it every 40ms
         //info!("Hello world #{}", cnt);
         Timer::after(Duration::from_millis(40)).await;
         cnt += 20; // 1 turn in 2s
@@ -511,6 +548,27 @@ async fn main(spawner: Spawner) -> ! {
             });
         }
 
+        // print uptime:
+        if cnt % 500 == 80 {
+            // every 1s
+            let uptime = Instant::now().duration_since_epoch().as_secs() as u32;
+            let hours = uptime / 3600;
+            let minutes = (uptime % 3600) / 60;
+            let seconds = uptime % 60;
+            let text_area = Rectangle::new(Point::new(5, 140), Size::new(160, 20));
+            if let Ok(uptime_text) =
+                heapless::format!(100; "Uptime:{:02}:{:02}:{:02}", hours, minutes, seconds)
+            {
+                let _ = draw_text(
+                    &uptime_text,
+                    text_area,
+                    Rgb565::BLACK,
+                    Rgb565::CSS_LIGHT_BLUE,
+                    &mut display,
+                );
+            };
+        }
+
         // check for home/weather updates
         if cnt % 1000 == 400 {
             // every 2s
@@ -518,7 +576,7 @@ async fn main(spawner: Spawner) -> ! {
                 if let Some(home) = &*hmiphome.borrow() {
                     if last_instant_home_update != home.uptime_last_update {
                         last_instant_home_update = home.uptime_last_update;
-                        let text_area = Rectangle::new(Point::new(5, 140), Size::new(160, 20));
+                        let text_area = Rectangle::new(Point::new(5, 160), Size::new(160, 20));
                         if let Ok(weather_text) = heapless::format!(100;
                             "Weather:{:.1}degC",
                             home.weather.temperature,
@@ -531,7 +589,7 @@ async fn main(spawner: Spawner) -> ! {
                                 &mut display,
                             );
                         };
-                        let text_area = Rectangle::new(Point::new(5, 170), Size::new(160, 20));
+                        let text_area = Rectangle::new(Point::new(5, 180), Size::new(160, 20));
                         if let Ok(weather_text) = heapless::format!(100;
                             "{} {}",
                             home.weather.condition,
