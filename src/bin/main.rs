@@ -1,11 +1,12 @@
 // Todos:
-// [] connect to homematic ip cloud and get data from there
-// [] twai / can support
+// [x] connect to homematic ip cloud and get data from there
+// [x] twai / can support
 // [] show error/state on display, e.g. state of wifi, ip, internet connectivity
 // [] check stack memory usage and add stack overflow handlers
 // [] detect USB/JTAG and show "debug infos"?
 // [] handle devices becoming stale, removed from event updates, not reachable...
-// [] OTA update support
+// [x] OTA update support
+// [] log via tcp
 // [] manual override of heating settings via touch display
 // [] update to esp-hal 1.0.0
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
@@ -73,6 +74,8 @@ use reqwless::client::HttpClient;
 
 extern crate alloc;
 
+esp_bootloader_esp_idf::esp_app_desc!();
+
 use hzg_roon_junkers::{
     display_handling::{draw_init_screen, draw_text, draw_text_7seg},
     heating::{HEATER_CONTROL, HEATING_TEXT_TO_DISPLAY, heating_task},
@@ -80,6 +83,7 @@ use hzg_roon_junkers::{
         DEVICES, HMIPHOME, HmIpGetHostResponse, TIMESTAMP_LAST_HMIP_UPDATE, json_process_device,
         json_process_home, single_https_request, websocket_connection,
     },
+    ota::ota_task,
 };
 
 // If you are okay with using a nightly compiler, you can use the macro provided by the static_cell crate: https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
@@ -283,7 +287,7 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         wifi_interface,
         config,
-        mk_static!(StackResources<3>, StackResources::<3>::new()),
+        mk_static!(StackResources<4>, StackResources::<4>::new()),
         net_seed,
     );
 
@@ -340,6 +344,7 @@ async fn main(spawner: Spawner) -> ! {
         ))
         .unwrap();
     spawner.spawn(heating_task(can_config)).unwrap();
+    spawner.spawn(ota_task(stack, peripherals.FLASH)).unwrap();
 
     // MARK: main loop
     let mut cnt = 0u32;
@@ -1017,7 +1022,8 @@ async fn connection(mut controller: WifiController<'static>) {
             Err(e) => {
                 info!("Failed to connect to wifi: {:?}", e);
                 // lets stop controller here and try again:
-                if !was_connected_once{ // TODO or if we do loop here for e.g. 1min? difficult to test...
+                if !was_connected_once {
+                    // TODO or if we do loop here for e.g. 1min? difficult to test...
                     info!("Stopping wifi controller to retry...");
                     if let Err(e) = controller.stop_async().await {
                         warn!("Failed to stop wifi controller: {:?}", e);

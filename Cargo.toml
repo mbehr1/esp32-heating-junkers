@@ -32,7 +32,9 @@ esp-rtos = { version = "0.1.1", features = [
 ] }
 
 defmt                  = "1.0.1"
-esp-bootloader-esp-idf = { version = "0.3.0", features = ["esp32c6"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c6", "defmt"] }
+esp-storage = {version = "0.8.0", features = ["defmt", "esp32c6"] }
+embedded-storage = "0.3.1"
 
 embassy-net = { version = "0.7.0", features = [
   "defmt",
@@ -93,7 +95,9 @@ eg-seven-segment = "0.2.0"
 embedded-charts = { version = "0.3.0", default-features = false, features = ["line", "no_std", "animations"] }
 
 #reqwless = { version = "0.13", default-features = false, features = ["defmt", "esp-mbedtls"], git="https://github.com/ImplFerris/reqwless", branch="esp-hal-1.0.0" }
-esp-mbedtls = { version="0.1", git="https://github.com/mbehr1/esp-mbedtls", features=["esp32c6", "async"]}
+esp-mbedtls = { version="0.1", git="https://github.com/mbehr1/esp-mbedtls", features=["esp32c6", "async"], rev="f5a0cd56d0e018ae37490ebbf766ef7083967c71"}
+esp-mbedtls-sys = { version="0.1", git="https://github.com/mbehr1/esp-mbedtls", features=["esp32c6"], rev="f5a0cd56d0e018ae37490ebbf766ef7083967c71"}
+
 reqwless = { version = "0.13", default-features = false, features = ["defmt", "esp-mbedtls", "alloc"], git="https://github.com/mbehr1/reqwless", branch = "fix/defmt_esp-mbedtls"}
 embedded-nal-async = "0.8.0"
 
@@ -107,8 +111,8 @@ nb ={ version = "1.1.0", features = ["defmt-0-3"]}
 
 # Force reqwless to use your esp-mbedtls fork
 [patch."https://github.com/esp-rs/esp-mbedtls"]
-esp-mbedtls = { git = "https://github.com/mbehr1/esp-mbedtls" }
-esp-mbedtls-sys = { git = "https://github.com/mbehr1/esp-mbedtls" }
+esp-mbedtls = { git = "https://github.com/mbehr1/esp-mbedtls", rev="f5a0cd56d0e018ae37490ebbf766ef7083967c71" }
+esp-mbedtls-sys = { git = "https://github.com/mbehr1/esp-mbedtls", rev="f5a0cd56d0e018ae37490ebbf766ef7083967c71" }
 
 [dev-dependencies]
 embedded-test = { version = "0.7.0-alpha.3", git = "https://github.com/probe-rs/embedded-test", branch = "next", features = [
