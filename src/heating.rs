@@ -254,6 +254,16 @@ pub static HEATER_CONTROL: Mutex<CriticalSectionRawMutex, RefCell<HeaterControl>
         heat_pump_eco_mode: 1,      // pump off as default
     }));
 
+pub struct HeaterOverwrite {
+    pub heating_need_perc: u16, // 0..100%
+    pub active_till: Instant,
+}
+pub static HEATER_OVERWRITE: Mutex<CriticalSectionRawMutex, RefCell<HeaterOverwrite>> =
+    Mutex::new(RefCell::new(HeaterOverwrite {
+        heating_need_perc: 70,     // 70% as default
+        active_till: Instant::MIN, // not active
+    }));
+
 #[embassy_executor::task]
 pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, Blocking>) {
     info!("task 'heating_task' running...");
@@ -702,27 +712,43 @@ async fn send_std_can_frame(
 }
 
 fn calc_heating_needs() -> u16 {
-    // lock the DEVICES mutex
-    let heating_need = DEVICES.lock(|devices| {
-        let devices = devices.borrow();
-
-        // for now a very simple calculation: sum of all valve positions / number of devices
-        let mut total_valve_position: u16 = 0;
-        for (id, device) in devices.iter().enumerate() {
-            debug!(
-                "Device ID: {}, Valve Position: {}",
-                id, device.valve_position
-            );
-            // ignore all devices with valve position <5%?
-            total_valve_position += (device.valve_position * 100.0) as u16;
-        }
-        if devices.is_empty() {
-            // warn!("No devices found for heating calculation!");
-            0
+    // manual override active?
+    let now = Instant::now();
+    let heating_need_manual = HEATER_OVERWRITE.lock(|ho| {
+        let ho = ho.borrow();
+        if now < ho.active_till {
+            Some(ho.heating_need_perc)
         } else {
-            total_valve_position / devices.len() as u16
+            None
         }
     });
+
+    // lock the DEVICES mutex
+    let heating_need = if let Some(manual_need) = heating_need_manual {
+        debug!("Using manual override heating need: {}%", manual_need);
+        manual_need
+    } else {
+        DEVICES.lock(|devices| {
+            let devices = devices.borrow();
+
+            // for now a very simple calculation: sum of all valve positions / number of devices
+            let mut total_valve_position: u16 = 0;
+            for (id, device) in devices.iter().enumerate() {
+                debug!(
+                    "Device ID: {}, Valve Position: {}",
+                    id, device.valve_position
+                );
+                // ignore all devices with valve position <5%?
+                total_valve_position += (device.valve_position * 100.0) as u16;
+            }
+            if devices.is_empty() {
+                // warn!("No devices found for heating calculation!");
+                0
+            } else {
+                total_valve_position / devices.len() as u16
+            }
+        })
+    };
 
     heating_need
 }

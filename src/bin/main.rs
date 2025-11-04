@@ -6,9 +6,10 @@
 // [] detect USB/JTAG and show "debug infos"?
 // [] handle devices becoming stale, removed from event updates, not reachable...
 // [x] OTA update support
-// [] log via tcp
+// [] log via tcp (fork from https://docs.rs/defmt-logger-tcp/0.2.2/src/defmt_logger_tcp/lib.rs.html#1-131 trying to send)
 // [] manual override of heating settings via touch display
-// [] fix [WARN ] Error during getCurrentState request: Some(Tls("MbedTlsError(-30592)")) (hzg_roon_junkers src/bin/main.rs:866) 0x7780
+// [] get real time clock via sntp https://github.com/vpetrigo/sntpc/blob/master/sntpc/src/lib.rs
+// [] fix [WARN ] Error during getCurrentState request: Some(Tls("MbedTlsError(-30592)")) (hzg_roon_junkers src/bin/main.rs:866) 0x7780, https://github.com/Mbed-TLS/mbedtls/blob/1873d3bfc2da771672bd8e7e8f41f57e0af77f33/include/mbedtls/ssl.h#L90 ERR_SSL_FATAL_ALERT_MESSAGE -> mbedtls_ssl_set_hostname() ?
 // [] custom bootloader with app rollback support. (specify new in in idf bootloader espflash.toml, https://github.com/espressif/esp-idf/tree/master/components/bootloader, https://danielmangum.com/posts/risc-v-bytes-exploring-custom-esp32-bootloader/...)
 // [] update to esp-hal 1.0.0
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
@@ -80,7 +81,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 use hzg_roon_junkers::{
     display_handling::{draw_init_screen, draw_text, draw_text_7seg},
-    heating::{HEATER_CONTROL, HEATING_TEXT_TO_DISPLAY, heating_task},
+    heating::{HEATER_CONTROL, HEATER_OVERWRITE, HEATING_TEXT_TO_DISPLAY, heating_task},
     homematic::{
         DEVICES, HMIPHOME, HmIpGetHostResponse, TIMESTAMP_LAST_HMIP_UPDATE, json_process_device,
         json_process_home, single_https_request, websocket_connection,
@@ -440,6 +441,26 @@ async fn main(spawner: Spawner) -> ! {
         if let Ok(Some(touches)) = touch_driver.get_touch_data() {
             for (i, touch) in touches.points.iter().enumerate() {
                 info!("Touch {}: X: {}, Y: {}", i, touch.x, touch.y);
+
+                // two touch fields:
+                // touch in upper half -> manual heating override on for 1h
+                // todo: add debounce detection after 1sec continous touch
+                if touch.y < 340 / 2 {
+                    info!("Manual heating override ON for 1h");
+                    HEATER_OVERWRITE.lock(|ho| {
+                        let mut ho = ho.borrow_mut();
+                        (*ho).active_till =
+                            embassy_time::Instant::now() + embassy_time::Duration::from_secs(3600);
+                        // ho.heating_need_percentage = 100;
+                    });
+                } else {
+                    info!("Manual heating override OFF");
+                    HEATER_OVERWRITE.lock(|ho| {
+                        let mut ho = ho.borrow_mut();
+                        (*ho).active_till = embassy_time::Instant::now();
+                        // ho.heating_need_percentage = 100;
+                    });
+                }
             }
         }
 
@@ -896,7 +917,7 @@ async fn cloud_connection_task(
                     ("CLIENTAUTH", CONFIG_TOML.hmip_clientauth),
                     ("ACCESSPOINT-ID", CONFIG_TOML.hmip_accesspoint_id),
                 ],
-                client_characteristics.as_bytes(), // br#"{"clientCharacteristics": {"apiVersion": "10", "applicationIdentifier": "homematicip-python", "applicationVersion": "1.0", "deviceManufacturer": "none", "deviceType": "Computer", "language": "de_DE", "osType": "Darwin", "osVersion": "25.0.0"}, "id": "3014F711A000506269927DA4"}"#.as_slice(),
+                client_characteristics.as_bytes(),
                 process_rest_response,
                 &mut client,
             )
