@@ -9,7 +9,7 @@
 // [] log via tcp (fork from https://docs.rs/defmt-logger-tcp/0.2.2/src/defmt_logger_tcp/lib.rs.html#1-131 trying to send)
 // [] manual override of heating settings via touch display
 // [] get real time clock via sntp https://github.com/vpetrigo/sntpc/blob/master/sntpc/src/lib.rs
-// [] fix [WARN ] Error during getCurrentState request: Some(Tls("MbedTlsError(-30592)")) (hzg_roon_junkers src/bin/main.rs:866) 0x7780, https://github.com/Mbed-TLS/mbedtls/blob/1873d3bfc2da771672bd8e7e8f41f57e0af77f33/include/mbedtls/ssl.h#L90 ERR_SSL_FATAL_ALERT_MESSAGE -> mbedtls_ssl_set_hostname() ?
+// [] fix [WARN ] Error during getCurrentState request: Some(Tls("MbedTlsError(-30592)")) (esp32-heating_junkers src/bin/main.rs:866) 0x7780, https://github.com/Mbed-TLS/mbedtls/blob/1873d3bfc2da771672bd8e7e8f41f57e0af77f33/include/mbedtls/ssl.h#L90 ERR_SSL_FATAL_ALERT_MESSAGE -> mbedtls_ssl_set_hostname() ?
 // [] custom bootloader with app rollback support. (specify new in in idf bootloader espflash.toml, https://github.com/espressif/esp-idf/tree/master/components/bootloader, https://danielmangum.com/posts/risc-v-bytes-exploring-custom-esp32-bootloader/...)
 // [] update to esp-hal 1.0.0
 // [x] retrigger getCurrentState and websocket connection after wifi connected/network ipv4 change...s
@@ -79,7 +79,7 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-use hzg_roon_junkers::{
+use esp32_heating_junkers::{
     display_handling::{draw_init_screen, draw_text, draw_text_7seg},
     heating::{HEATER_CONTROL, HEATER_OVERWRITE, HEATING_TEXT_TO_DISPLAY, heating_task},
     homematic::{
@@ -175,6 +175,15 @@ async fn main(spawner: Spawner) -> ! {
             esp_hal::system::Cpu::ProCpu
         ))
     );
+
+    /* hmac and aes still available
+    // hmac:
+    let mut hmac = esp_hal::hmac::Hmac::new(peripherals.HMAC);
+    hmac.init();
+
+    // aes:
+    let aes = esp_hal::aes::Aes::new(peripherals.AES);
+    */
 
     // configure watchdog (Rwdt)
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);

@@ -1,11 +1,11 @@
 [package]
 edition      = "2024"
-name         = "hzg-roon-junkers"
-rust-version = "1.88"
+name         = "esp32-heating-junkers"
+rust-version = "1.92"
 version      = "0.1.0"
 
 [[bin]]
-name = "hzg-roon-junkers"
+name = "esp32-heating-junkers"
 path = "./src/bin/main.rs"
 test = false
 

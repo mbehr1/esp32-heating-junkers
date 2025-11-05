@@ -18,7 +18,7 @@ extern crate alloc;
 ///
 /// The image can be generated using:
 /// ```sh
-/// espflash save-image --chip esp32c6 -s 8mb target/riscv32imac-unknown-none-elf/release/hzg-roon-junkers ota_img.bin
+/// espflash save-image --chip esp32c6 -s 8mb target/riscv32imac-unknown-none-elf/release/esp32-heating-junkers ota_img.bin
 /// ```
 
 // ota update task
