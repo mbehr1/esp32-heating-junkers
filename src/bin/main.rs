@@ -46,6 +46,7 @@ use embedded_graphics::{
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::{
     clock::CpuClock,
+    debugger::debugger_connected,
     delay::Delay,
     gpio::{Level, Output, OutputConfig},
     i2c::master::{Config as ConfigI2C, I2c},
@@ -80,6 +81,7 @@ extern crate alloc;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 use esp32_heating_junkers::{
+    defmt_via_tcp,
     display_handling::{draw_init_screen, draw_text, draw_text_7seg},
     heating::{HEATER_CONTROL, HEATER_OVERWRITE, HEATING_TEXT_TO_DISPLAY, heating_task},
     homematic::{
@@ -153,7 +155,7 @@ extern "C" fn random() -> core::ffi::c_ulong {
 async fn main(spawner: Spawner) -> ! {
     // generator version: 0.6.0
 
-    rtt_target::rtt_init_defmt!();
+    let mut log_consumer = defmt_via_tcp::init();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -586,16 +588,18 @@ async fn main(spawner: Spawner) -> ! {
             let minutes = (uptime % 3600) / 60;
             let seconds = uptime % 60;
             let text_area = Rectangle::new(Point::new(5, 140), Size::new(160, 20));
-            if let Ok(uptime_text) =
-                heapless::format!(100; "Uptime:{:02}:{:02}:{:02}", hours, minutes, seconds)
+            if let Ok(uptime_text) = heapless::format!(100; "Up{}:{:02}:{:02}:{:02}", log_consumer.data_size(),
+                hours, minutes, seconds)
             {
-                let _ = draw_text(
-                    &uptime_text,
-                    text_area,
-                    Rgb565::BLACK,
-                    Rgb565::CSS_LIGHT_BLUE,
-                    &mut display,
-                );
+                if log_consumer.data_size() > 1000 {
+                    log_consumer.flush();
+                }
+                let color = if debugger_connected() {
+                    Rgb565::CSS_ORANGE_RED
+                } else {
+                    Rgb565::CSS_LIGHT_BLUE
+                };
+                let _ = draw_text(&uptime_text, text_area, Rgb565::BLACK, color, &mut display);
             };
         }
 
