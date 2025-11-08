@@ -1,5 +1,20 @@
+use uuid::Uuid;
+
 fn main() {
+    // provide a uuid-like build ID to embed in the binary
+    // gnu build-id should be enough but I fail to read it from the
+    // flashed binary on target. So using a custom one here via the
+    // env! macro in the code.
+    let build_uuid = Uuid::now_v7().as_bytes().to_owned();
+
+    let build_id_hex = build_uuid
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    println!("cargo:rustc-env=BUILD_ID={}", build_id_hex);
+
     linker_be_nice();
+    println!("cargo:rustc-link-arg=-build-id=0x{}", build_id_hex);
     println!("cargo:rustc-link-arg-tests=-Tembedded-test.x");
     println!("cargo:rustc-link-arg=-Tdefmt.x");
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)

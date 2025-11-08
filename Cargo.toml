@@ -36,7 +36,7 @@ esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32c6", "defmt"] }
 esp-storage = {version = "0.8.0", features = ["defmt", "esp32c6"] }
 embedded-storage = "0.3.1"
 
-embassy-net = { version = "0.7.0", features = [
+embassy-net = { version = "0.7.1", features = [
   "defmt",
   "dhcpv4",
   "dhcpv4-hostname",
@@ -122,6 +122,9 @@ embedded-test = { version = "0.7.0-alpha.3", git = "https://github.com/probe-rs/
   "embassy",
   "external-executor",
 ] }
+
+[build-dependencies]
+uuid = {version = "1.18.1", features = ["v7"]}
 
 [profile.dev]
 # Rust debug is too slow.

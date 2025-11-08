@@ -5,7 +5,6 @@ use embassy_net::{IpListenEndpoint, Stack, tcp::TcpSocket};
 use embassy_time::{Duration, Timer};
 use embedded_storage::Storage;
 use esp_bootloader_esp_idf::partitions::FlashRegion;
-use esp_hal::peripherals;
 use esp_storage::FlashStorage;
 
 extern crate alloc;
@@ -23,12 +22,8 @@ extern crate alloc;
 
 // ota update task
 #[embassy_executor::task]
-pub async fn ota_task(
-    stack: Stack<'static>,
-    flash: peripherals::FLASH<'static>, /* sha: esp_hal::peripherals::SHA<'static>*/
-) {
+pub async fn ota_task(stack: Stack<'static>, mut flash: FlashStorage<'static>) {
     Timer::after(Duration::from_secs(5)).await;
-    let mut flash = FlashStorage::new(flash);
     let mut buffer =
         alloc::boxed::Box::new([0u8; esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN]); // TODO optimize to only load once needed!
     let mut ota =
@@ -112,13 +107,14 @@ pub async fn ota_task(
 }
 
 #[derive(Default)]
-struct EspImageSegmentHeader {
+pub(crate) struct EspImageSegmentHeader {
     pub load_addr: u32,
     pub data_len: u32,
 }
 
+#[derive(Default)]
 #[repr(C, packed(1))]
-struct EspImageHeader {
+pub(crate) struct EspImageHeader {
     pub magic: u8,
     pub segment_count: u8,
     pub spi_mode: u8,
@@ -367,6 +363,7 @@ where
             let sha256_from_recvd = sha_hasher.finish();
             if sha256_from_recvd == data_buf[read - 32..read] {
                 info!("SHA256 verification successful");
+                // info!("Received SHA256:    {:?}", &sha256_from_recvd);
             } else {
                 warn!("SHA256 verification failed");
                 return Err(embassy_net::tcp::Error::ConnectionReset);
