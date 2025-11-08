@@ -183,7 +183,7 @@ pub async fn log_serve_task(
                     Err(e) => {
                         warn!("defmt_via_tcp: could not send initial headers: {:?}", e);
                         // close socket and retry
-                        let _ = client.abort();
+                        client.abort();
                         Timer::after(Duration::from_secs(1)).await; // depending on the error code use a different delay?
                         continue;
                     }
@@ -289,24 +289,24 @@ pub async fn get_current_app_sha256(flash: &mut FlashStorage<'static>) -> [u8; 3
         let mut flash_region = booted_partition.as_embedded_storage(flash);
         // need to read the image header, evaluate number of segments and read all segments to get to the crc/sha256
         let mut esp_image_header = EspImageHeader::default();
-        let mut header_bytes: &mut [u8] = unsafe {
+        let header_bytes: &mut [u8] = unsafe {
             core::slice::from_raw_parts_mut(
                 &mut esp_image_header as *mut EspImageHeader as *mut u8,
                 core::mem::size_of::<EspImageHeader>(),
             )
         };
-        flash_region.read(0, &mut header_bytes).unwrap();
+        flash_region.read(0, header_bytes).unwrap();
         let num_segments = esp_image_header.segment_count;
         let mut offset = core::mem::size_of::<EspImageHeader>() as u32;
         for _ in 0..num_segments {
             let mut seg_header: EspImageSegmentHeader = EspImageSegmentHeader::default();
-            let mut seg_header_bytes: &mut [u8] = unsafe {
+            let seg_header_bytes: &mut [u8] = unsafe {
                 core::slice::from_raw_parts_mut(
                     &mut seg_header as *mut EspImageSegmentHeader as *mut u8,
                     core::mem::size_of::<EspImageSegmentHeader>(),
                 )
             };
-            flash_region.read(offset, &mut seg_header_bytes).unwrap();
+            flash_region.read(offset, seg_header_bytes).unwrap();
             offset += core::mem::size_of::<EspImageSegmentHeader>() as u32;
             offset += seg_header.data_len;
         }

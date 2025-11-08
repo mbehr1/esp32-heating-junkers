@@ -83,10 +83,10 @@ const CF_WW_CUR_SUPPLY_TEMP: u16 = 0x205; // current allowed supply temp, 1 data
 /// Störungsmeldungen Hex Wert siehe ( Bedienungsanleitung )  00=Heizung ok
 const CF_ERROR_MESSAGES: u16 = 0x206; // error messages, 1 data byte, hex value see manual, 00=heating ok
 
-/// aktuell Außentemperatur
+// aktuell Außentemperatur
 // const CF_CUR_OUTSIDE_TEMP: u16 = 0x207; // current outside temp, 2 data bytes in 0.01 °C steps (signed), eg 0x07E2=2018=20,18°C
 
-/// 0x208 -> unknown... (im Log nur 0x01)
+// 0x208 -> unknown... (im Log nur 0x01)
 
 /// aktueller Brennerstatus
 const CF_CUR_BURNER_STATUS: u16 = 0x209; // current burner status, 1 data byte, 00: off, 01: on
@@ -94,14 +94,14 @@ const CF_CUR_BURNER_STATUS: u16 = 0x209; // current burner status, 1 data byte, 
 /// aktueller Status Heizungspumpe
 const CF_HEAT_CUR_PUMP_STATUS: u16 = 0x20A; // current pump status, 1 data byte, 00: off, 01: on
 
-/// 20BH  1 Byte   Speicherladung  EIN / AUS ?
+// 20BH  1 Byte   Speicherladung  EIN / AUS ?
 
-/// 20CH  1 Byte   Sommer / Winterbetrieb Wert=00 Sommer Wert 01=Winter
+// 20CH  1 Byte   Sommer / Winterbetrieb Wert=00 Sommer Wert 01=Winter
 
-/// 0x20D 1 byte unknown...  max Heizleistung in KW?
+// 0x20D 1 byte unknown...  max Heizleistung in KW?
 
-/// 250H  1 Byte  Sollwert von TR: Heizbetrieb 00=Aus 01=Ein
-/// 251H  1 Byte  Sollwert von TR: Heizleistung gleitend (00-FF)
+// 250H  1 Byte  Sollwert von TR: Heizbetrieb 00=Aus 01=Ein
+// 251H  1 Byte  Sollwert von TR: Heizleistung gleitend (00-FF)
 
 /// Vorlauftemperatur Hzg Sollwert (we need to send it)
 const CF_HEAT_TARGET_SUPPLY_TEMP: u16 = 0x252; // target value for supply temp, 1 data byte (0.5 °C steps)
@@ -111,12 +111,12 @@ const CF_HEAT_PUMP_ECO_MODE: u16 = 0x253; // heating pump control, 1 data byte, 
 // 254H  1 Byte  Sollwert von TR: WW-Sofort 00=Aus 01=Ein
 // 255H  1 Byte  Sollwert von TR: WW-Sollwert in Halbgradschritten--> bei einer ZWx Therme mit WW-Bereitung im Durchlaufprinzip, im Normalfall identisch mit 202H
 
-/// Vorlauftemperatur Warmwasser Sollwert (we need to send it)
-///
-/// 10°C -> treated as off
+// Vorlauftemperatur Warmwasser Sollwert (we need to send it)
+//
+// 10°C -> treated as off
 // const CF_WW_TARGET_SUPPLY_TEMP: u16 = 0x255; // target value for supply temp, 1 data byte (0.5 °C steps)
 
-/// current time frame (we can send it periodically, but no need)
+// current time frame (we can send it periodically, but no need)
 // const CF_CUR_TIME: u16 = 0x256; // current time frame, 4 data bytes DOW (N = ISO-8601 numeric representation of the day of the week. (1 = Monday, 7 = Sunday)) HH MM 4:  6 9 27 4 = Sat 09:27
 
 const CF_TR_OUTSIDE_TEMP_CTRL: u16 = 0x258; // TR outside temperature control, 1 data byte, 00=room thermostat, 01=weather compensated control
@@ -233,7 +233,7 @@ impl PartialEq for CanTxEntry {
 impl Eq for CanTxEntry {}
 impl PartialOrd for CanTxEntry {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.next_tx.cmp(&other.next_tx))
+        Some(self.cmp(other))
     }
 }
 impl Ord for CanTxEntry {
@@ -378,7 +378,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                     let data = frame.data();
                     match frame.id() {
                         Id::Standard(id) if matches!(id.as_raw(), CF_ERROR_MESSAGES) => {
-                            if data.len() >= 1 {
+                            if !data.is_empty() {
                                 let err_msg = data[0];
                                 info!("rcvd: Störungsmeldung: 0x{:02X}", err_msg);
                                 heater_state.err_msg = err_msg;
@@ -391,7 +391,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                                 CF_CUR_BURNER_STATUS | CF_HEAT_CUR_PUMP_STATUS
                             ) =>
                         {
-                            if data.len() >= 1 {
+                            if !data.is_empty() {
                                 let status = data[0] != 0;
                                 match id.as_raw() {
                                     CF_CUR_BURNER_STATUS => {
@@ -421,7 +421,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                                     | CF_WW_CUR_SUPPLY_TEMP
                             ) =>
                         {
-                            if data.len() >= 1 {
+                            if !data.is_empty() {
                                 let cur_temp_raw = data[0];
                                 let temp_celsius = (cur_temp_raw as f32) / 2.0;
                                 match id.as_raw() {
@@ -466,25 +466,24 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
         if !can.is_bus_off() {
             // now send any frames that are due:
             let now = embassy_time::Instant::now();
-            if now >= next_earliest_tx_time {
-                if let Some(entry) = tx_queue.peek() {
-                    if entry.next_tx <= now {
-                        let mut entry = tx_queue.pop().unwrap();
-                        // send it:
-                        if let Err(e) = send_std_can_frame(&mut can, entry.id, &entry.data, 3).await
-                        {
-                            warn!("Error sending CAN frame: {}", defmt::Debug2Format(&e));
-                        }
-                        let now = Instant::now();
-                        next_earliest_tx_time = now + MIN_CAN_TX_DISTANCE;
-                        // if periodic, re-insert with updated next_tx
-                        if entry.cycle_time >= MIN_CAN_TX_DISTANCE {
-                            entry.next_tx = now + entry.cycle_time;
-                            tx_queue.push(entry).unwrap();
-                        }
-                    }
+            if now >= next_earliest_tx_time
+                && let Some(entry) = tx_queue.peek()
+                && entry.next_tx <= now
+            {
+                let mut entry = tx_queue.pop().unwrap();
+                // send it:
+                if let Err(e) = send_std_can_frame(&mut can, entry.id, &entry.data, 3).await {
+                    warn!("Error sending CAN frame: {}", defmt::Debug2Format(&e));
+                }
+                let now = Instant::now();
+                next_earliest_tx_time = now + MIN_CAN_TX_DISTANCE;
+                // if periodic, re-insert with updated next_tx
+                if entry.cycle_time >= MIN_CAN_TX_DISTANCE {
+                    entry.next_tx = now + entry.cycle_time;
+                    tx_queue.push(entry).unwrap();
                 }
             }
+
         // send simulated can frames: (only for testing without real heating controller)
         /*
                     if let Err(e) = send_std_can_frame(&mut can, CF_HEAT_MAX_SUPPLY_TEMP, &[150u8], 3).await {
@@ -513,20 +512,19 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
     // warn!("end heating_task");
 }
 
-/// Update the display data with current target values
-///
-/// We toggle the following infos:
-/// - if there is an error, show "E xx" every 2s for 1s
-/// - If the pump is off (eco mode), show "H. AUS", cyclically
-/// - If the pump is on, show the target supply temp, cyclically
-/// - Show the burner status "B. ON" and pump status ("P. ON"), cyclically
-/// - Show the current water temp as well "W xx.x°C", cyclically
+// Update the display data with current target values
+//
+// We toggle the following infos:
+// - if there is an error, show "E xx" every 2s for 1s
+// - If the pump is off (eco mode), show "H. AUS", cyclically
+// - If the pump is on, show the target supply temp, cyclically
+// - Show the burner status "B. ON" and pump status ("P. ON"), cyclically
+// - Show the current water temp as well "W xx.x°C", cyclically
 
 // the logic is realized by a simple state machine via:
 // a list that gets cycled through every 1s
 // list items: ERROR, PUMP_STATE, ERROR, BURNER_STATE, ERROR, TARGET_TEMP, ERROR, WATER_TEMP
 // error is skipped if no error
-
 enum DisplayState {
     Error,
     PumpState,
@@ -724,7 +722,7 @@ fn calc_heating_needs() -> u16 {
     });
 
     // lock the DEVICES mutex
-    let heating_need = if let Some(manual_need) = heating_need_manual {
+    if let Some(manual_need) = heating_need_manual {
         debug!("Using manual override heating need: {}%", manual_need);
         manual_need
     } else {
@@ -748,7 +746,5 @@ fn calc_heating_needs() -> u16 {
                 total_valve_position / devices.len() as u16
             }
         })
-    };
-
-    heating_need
+    }
 }

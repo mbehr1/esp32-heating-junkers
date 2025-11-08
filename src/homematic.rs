@@ -72,6 +72,7 @@ pub struct HmIpGetHostResponse<'a> {
     pub url_websocket: &'a str,
 }
 
+#[allow(clippy::result_unit_err)]
 pub fn json_process_weather<'read, 'parent, R, S>(
     weather: core_json::Field<'read, 'parent, R, S>,
     weather_data: &mut WeatherData,
@@ -117,6 +118,7 @@ where
     }
 }
 
+#[allow(clippy::result_unit_err)]
 pub fn json_process_home<'read, 'parent, R, S>(
     home: core_json::Field<'read, 'parent, R, S>,
 ) -> Result<bool, ()>
@@ -135,6 +137,7 @@ where
             let home_field_key: heapless::String<100> =
                 home_field.key().filter_map(|k| k.ok()).collect();
 
+            #[allow(clippy::single_match)]
             match home_field_key.as_ref() {
                 "weather" => {
                     do_update = json_process_weather(home_field, &mut hmip_home.weather).is_ok()
@@ -155,6 +158,7 @@ where
 }
 
 /// Process a JSON device object and update the DEVICES list if it's a HEATING_THERMOSTAT
+#[allow(clippy::result_unit_err)]
 pub fn json_process_device<'read, 'parent, R, S>(
     mut device: core_json::Field<'read, 'parent, R, S>,
 ) -> Result<(), ()>
@@ -353,7 +357,7 @@ where
             ("Upgrade", "websocket"),
             ("Connection", "Upgrade"),
             ("Sec-WebSocket-Version", "13"),
-            ("Sec-WebSocket-Key", &sec_websocket_key),
+            ("Sec-WebSocket-Key", sec_websocket_key),
         ];
         full_headers
             .extend_from_slice(&ws_headers)
@@ -382,10 +386,10 @@ where
                 );
             }
             // we expect a status code 101 (and no body)
-            if let Ok(body) = response.body().read_to_end().await {
-                if let Ok(body_str) = core::str::from_utf8(body) {
-                    info!("Response body: {}", body_str);
-                }
+            if let Ok(body) = response.body().read_to_end().await
+                && let Ok(body_str) = core::str::from_utf8(body)
+            {
+                info!("Response body: {}", body_str);
             }
         }
 
@@ -463,7 +467,7 @@ where
                                 );
                                 match frame.message_type {
                             embedded_websocket::WebSocketReceiveMessageType::Text => {
-                                frame_buffer_used += frame.len_to as usize;
+                                frame_buffer_used += frame.len_to;
                                 if frame.end_of_message {
                                     if let Ok(text) = core::str::from_utf8(&frame_buffer
                                         [..frame_buffer_used ])
@@ -476,7 +480,7 @@ where
                                 }
                             }
                             embedded_websocket::WebSocketReceiveMessageType::Binary => {
-                                frame_buffer_used += frame.len_to as usize;
+                                frame_buffer_used += frame.len_to;
                                 if frame.end_of_message {
                                     // complete message received
                                     // DEVICE_CHANGED 7kb: {"events":{"0":{"pushEventType":"DEVICE_CHANGED","device":{"id":"3014F

@@ -6,7 +6,7 @@
 // [] detect USB/JTAG and show "debug infos"?
 // [] handle devices becoming stale, removed from event updates, not reachable...
 // [x] OTA update support
-// [] log via tcp (fork from https://docs.rs/defmt-logger-tcp/0.2.2/src/defmt_logger_tcp/lib.rs.html#1-131 trying to send)
+// [x] log via tcp (interacts with remote-defmt-srv)
 // [] manual override of heating settings via touch display
 // [] check watchdog working on panics
 // [] get real time clock via sntp https://github.com/vpetrigo/sntpc/blob/master/sntpc/src/lib.rs
@@ -268,7 +268,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let spi_device = ExclusiveDevice::new(display_spi, lcd_cs, embassy_time::Delay).unwrap();
 
-    let mut buffer = alloc::boxed::Box::new([0_u8; 1 * 2048]); // even 20k makes no visible change
+    let mut buffer = alloc::boxed::Box::new([0_u8; 2048]); // even 20k makes no visible change
 
     let di = SpiInterface::new(spi_device, lcd_dc, buffer.as_mut_slice());
 
@@ -480,7 +480,7 @@ async fn main(spawner: Spawner) -> ! {
                     info!("Manual heating override ON for 1h");
                     HEATER_OVERWRITE.lock(|ho| {
                         let mut ho = ho.borrow_mut();
-                        (*ho).active_till =
+                        ho.active_till =
                             embassy_time::Instant::now() + embassy_time::Duration::from_secs(3600);
                         // ho.heating_need_percentage = 100;
                     });
@@ -488,7 +488,7 @@ async fn main(spawner: Spawner) -> ! {
                     info!("Manual heating override OFF");
                     HEATER_OVERWRITE.lock(|ho| {
                         let mut ho = ho.borrow_mut();
-                        (*ho).active_till = embassy_time::Instant::now();
+                        ho.active_till = embassy_time::Instant::now();
                         // ho.heating_need_percentage = 100;
                     });
                 }
@@ -585,7 +585,7 @@ async fn main(spawner: Spawner) -> ! {
             // every  0.4s (as text might be updated every 1s)
             HEATING_TEXT_TO_DISPLAY.lock(|heating_text| {
                 let (heating_text, text_color, bg_color) = &*heating_text.borrow();
-                if !(heating_text.cmp(&last_heating_text) == core::cmp::Ordering::Equal) {
+                if heating_text.cmp(&last_heating_text) != core::cmp::Ordering::Equal {
                     last_heating_text.clear();
                     last_heating_text.push_str(heating_text.as_str()).unwrap();
                     let text_area = Rectangle::new(Point::new(5, 100), Size::new(160, 30));
@@ -624,37 +624,37 @@ async fn main(spawner: Spawner) -> ! {
         if cnt % 1000 == 400 {
             // every 2s
             HMIPHOME.lock(|hmiphome| {
-                if let Some(home) = &*hmiphome.borrow() {
-                    if last_instant_home_update != home.uptime_last_update {
-                        last_instant_home_update = home.uptime_last_update;
-                        let text_area = Rectangle::new(Point::new(5, 160), Size::new(160, 20));
-                        if let Ok(weather_text) = heapless::format!(100;
-                            "Weather:{:.1}degC",
-                            home.weather.temperature,
-                        ) {
-                            let _ = draw_text(
-                                &weather_text,
-                                text_area,
-                                Rgb565::BLACK,
-                                Rgb565::WHITE,
-                                &mut display,
-                            );
-                        };
-                        let text_area = Rectangle::new(Point::new(5, 180), Size::new(160, 20));
-                        if let Ok(weather_text) = heapless::format!(100;
-                            "{} {}",
-                            home.weather.condition,
-                            home.weather.daytime,
-                        ) {
-                            let _ = draw_text(
-                                &weather_text,
-                                text_area,
-                                Rgb565::BLACK,
-                                Rgb565::WHITE,
-                                &mut display,
-                            );
-                        };
-                    }
+                if let Some(home) = &*hmiphome.borrow()
+                    && last_instant_home_update != home.uptime_last_update
+                {
+                    last_instant_home_update = home.uptime_last_update;
+                    let text_area = Rectangle::new(Point::new(5, 160), Size::new(160, 20));
+                    if let Ok(weather_text) = heapless::format!(100;
+                        "Weather:{:.1}degC",
+                        home.weather.temperature,
+                    ) {
+                        let _ = draw_text(
+                            &weather_text,
+                            text_area,
+                            Rgb565::BLACK,
+                            Rgb565::WHITE,
+                            &mut display,
+                        );
+                    };
+                    let text_area = Rectangle::new(Point::new(5, 180), Size::new(160, 20));
+                    if let Ok(weather_text) = heapless::format!(100;
+                        "{} {}",
+                        home.weather.condition,
+                        home.weather.daytime,
+                    ) {
+                        let _ = draw_text(
+                            &weather_text,
+                            text_area,
+                            Rgb565::BLACK,
+                            Rgb565::WHITE,
+                            &mut display,
+                        );
+                    };
                 }
             });
         }
@@ -666,7 +666,7 @@ async fn main(spawner: Spawner) -> ! {
             TIMESTAMP_LAST_HMIP_UPDATE.lock(|tsp| {
                 let tsp_borrow = tsp.borrow();
                 if last_timestamp_hmip_update != *tsp_borrow {
-                    last_timestamp_hmip_update = tsp_borrow.clone();
+                    last_timestamp_hmip_update = *tsp_borrow;
                     tdp_did_change = true;
                 }
             });
@@ -697,7 +697,7 @@ async fn main(spawner: Spawner) -> ! {
         }
 
         // show list of devices on screen: (only if updates... detect via last_status_update max value)
-        if cnt % 1000 == 0 {
+        if cnt.is_multiple_of(1000) {
             // every 2s
             DEVICES.lock(|devices| {
                 let devices = devices.borrow();
@@ -772,11 +772,11 @@ async fn cloud_connection_task(
     loop {
         // Wait for network to be ready
         loop {
-            if stack.is_link_up() {
-                if let Some(config) = stack.config_v4() {
-                    info!("CC: network ready with IP: {:?}", config.address);
-                    break;
-                }
+            if stack.is_link_up()
+                && let Some(config) = stack.config_v4()
+            {
+                info!("CC: network ready with IP: {:?}", config.address);
+                break;
             }
             Timer::after(Duration::from_millis(500)).await;
         }
@@ -815,14 +815,13 @@ async fn cloud_connection_task(
                     *url_websocket.borrow_mut() =
                         heapless::String::try_from(resp.url_websocket).ok();
                     // replace wss: with https:
-                    if let Some(ref mut url_ws) = *url_websocket.borrow_mut() {
-                        if url_ws.starts_with("wss:") {
-                            let https_url =
-                                heapless::format!(64; "https:{}", &url_ws.as_str()[4..])
-                                    .unwrap_or_default();
-                            *url_ws = https_url;
-                            info!("Converted urlWebSocket to HTTPS URL: {}", url_ws);
-                        }
+                    if let Some(ref mut url_ws) = *url_websocket.borrow_mut()
+                        && url_ws.starts_with("wss:")
+                    {
+                        let https_url = heapless::format!(64; "https:{}", &url_ws.as_str()[4..])
+                            .unwrap_or_default();
+                        *url_ws = https_url;
+                        info!("Converted urlWebSocket to HTTPS URL: {}", url_ws);
                     }
                 }
                 Err(err) => {
@@ -862,8 +861,9 @@ async fn cloud_connection_task(
         }
 
         // do we have a rest url? then open a session to that one:
-        if let Some(url_rest) = &*url_rest.borrow() {
-            info!("Got REST URL from getHost: {}", url_rest);
+        let url_rest_clone = url_rest.borrow().clone();
+        if let Some(mut url) = url_rest_clone {
+            info!("Got REST URL from getHost: {}", url);
             let process_rest_response = |code, body: &mut [u8]| {
                 info!(
                     "Processing REST response with status code {}:, body.len(): {}",
@@ -878,53 +878,51 @@ async fn cloud_connection_task(
                     core_json::Deserializer::<&[u8], core_json::ConstStack<20>>::new(&body[..])
                 {
                     if let Ok(mut val) = des.value() {
-                        if let Ok(core_json::Type::Object) = val.kind() {
-                            if let Ok(mut fields) = val.fields() {
-                                loop {
-                                    match fields.next() {
-                                        Some(Ok(mut field)) => {
-                                            // collect field key:
-                                            let key: heapless::String<200> =
-                                                field.key().filter_map(|k| k.ok()).collect();
-                                            // info!("Field key: {}", key);
-                                            match key.as_ref() {
-                                                "home" => {
-                                                    info!("Processing 'home' object");
-                                                    let _ = json_process_home(field);
-                                                }
-                                                "devices" => {
-                                                    // info!("Processing 'devices':");
-                                                    // iterate over devices: (object keys are device ids)
-                                                    if let Ok(mut devices) = field.value().fields()
-                                                    {
-                                                        while let Some(Ok(device)) = devices.next()
-                                                        {
-                                                            let _ = json_process_device(device);
-                                                        }
+                        if let Ok(core_json::Type::Object) = val.kind()
+                            && let Ok(mut fields) = val.fields()
+                        {
+                            loop {
+                                match fields.next() {
+                                    Some(Ok(mut field)) => {
+                                        // collect field key:
+                                        let key: heapless::String<200> =
+                                            field.key().filter_map(|k| k.ok()).collect();
+                                        // info!("Field key: {}", key);
+                                        match key.as_ref() {
+                                            "home" => {
+                                                info!("Processing 'home' object");
+                                                let _ = json_process_home(field);
+                                            }
+                                            "devices" => {
+                                                // info!("Processing 'devices':");
+                                                // iterate over devices: (object keys are device ids)
+                                                if let Ok(mut devices) = field.value().fields() {
+                                                    while let Some(Ok(device)) = devices.next() {
+                                                        let _ = json_process_device(device);
                                                     }
                                                 }
-                                                "clients" | "groups" => {}
-                                                _ => {
-                                                    // clients, groups
-                                                    warn!("Ignoring field key: {}", key);
-                                                }
+                                            }
+                                            "clients" | "groups" => {}
+                                            _ => {
+                                                // clients, groups
+                                                warn!("Ignoring field key: {}", key);
                                             }
                                         }
-                                        Some(Err(e)) => {
-                                            warn!(
-                                                "Error iterating field: {:?}",
-                                                defmt::Debug2Format(&e)
-                                            );
-                                            // dont break;
-                                        }
-                                        None => {
-                                            break;
-                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        warn!(
+                                            "Error iterating field: {:?}",
+                                            defmt::Debug2Format(&e)
+                                        );
+                                        // dont break;
+                                    }
+                                    None => {
+                                        break;
                                     }
                                 }
                             }
-                            // iterate over the fields: (expect home, groups, devices, clients)
                         }
+                        // iterate over the fields: (expect home, groups, devices, clients)
                     } else {
                         warn!("Failed to parse first JSON value");
                     }
@@ -934,7 +932,6 @@ async fn cloud_connection_task(
             };
 
             // add /hmip/home/getCurrentState
-            let mut url = url_rest.clone();
             url.push_str("/hmip/home/getCurrentState").unwrap();
             info!("Full REST URL for getCurrentState: {}", url);
             let _rest_res = single_https_request(
@@ -963,7 +960,9 @@ async fn cloud_connection_task(
             warn!("No REST URL obtained from getHost, cannot proceed");
         }
 
-        if let Some(url_websocket) = &*url_websocket.borrow() {
+        let url_websocket_clone: Option<alloc::string::String> =
+            url_websocket.borrow().as_ref().map(|s| s.as_str().into());
+        if let Some(url_websocket) = url_websocket_clone {
             let process_binary_cb = |data: &mut [u8]| {
                 info!("Received websocket binary data, len: {}", data.len());
                 if let Ok(ref mut des) =
@@ -1056,7 +1055,7 @@ async fn cloud_connection_task(
 
             // open websocket connection to url_websocket
             let _ws_res = websocket_connection(
-                url_websocket,
+                &url_websocket,
                 &[
                     ("AUTHTOKEN", CONFIG_TOML.hmip_authtoken),
                     ("CLIENTAUTH", CONFIG_TOML.hmip_clientauth),

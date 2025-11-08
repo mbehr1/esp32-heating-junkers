@@ -43,7 +43,7 @@ pub async fn ota_task(stack: Stack<'static>, mut flash: FlashStorage<'static>) {
         }
         info!("Starting OTA server socket");
 
-        let mut rx_buf = alloc::boxed::Box::new([0_u8; 1 * 1024]); // we want 1kb chunks
+        let mut rx_buf = alloc::boxed::Box::new([0_u8; 1024]); // we want 1kb chunks
         let mut tx_buf = alloc::boxed::Box::new([0_u8; 128]);
         let mut server = TcpSocket::new(stack, rx_buf.as_mut_slice(), tx_buf.as_mut_slice());
 
@@ -296,7 +296,7 @@ where
             sha_hasher.update(seg_header_bytes);
             // write data chunks, starting with the less than 4kb, then 4kb chunks, then the last less than 4kb
             // let first chunk be less than 4kb
-            let bytes_to_next_page = if flash_offset % 4096 > 0 {
+            let bytes_to_next_page = if !flash_offset.is_multiple_of(4096) {
                 4096 - (flash_offset % 4096)
             } else {
                 4096
@@ -322,7 +322,7 @@ where
             remaining -= first_chunk_size;
 
             while remaining > 0 {
-                assert!(flash_offset % 4096 == 0);
+                assert!(flash_offset.is_multiple_of(4096));
                 let to_read = remaining.min(4096);
                 let read = read_chunk(socket, &mut (data_buf.as_mut_slice()[..to_read])).await?;
 
@@ -343,7 +343,7 @@ where
         }
         let _ = socket.write(b"INFO: Processing SHA...\n").await;
         debug!("Reading post-segment data crc and sha...");
-        let read = read_chunk(socket, &mut (data_buf.as_mut_slice())).await?;
+        let read = read_chunk(socket, data_buf.as_mut_slice()).await?;
         info!("Read {} bytes of post-segment data", read);
         if read > 32 && read <= 32 + 16 {
             // 1 byte checksum follows that is 16 byte padded
@@ -507,14 +507,13 @@ where
     );
 
     // TODO when to mark new one as valid? (should do only after e.g. a min of uptime)
-    if let Ok(state) = ota.current_ota_state() {
-        if state == esp_bootloader_esp_idf::ota::OtaImageState::New
-            || state == esp_bootloader_esp_idf::ota::OtaImageState::PendingVerify
-        {
-            info!("Changed state to VALID");
-            ota.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::Valid)
-                .unwrap();
-        }
+    if let Ok(state) = ota.current_ota_state()
+        && (state == esp_bootloader_esp_idf::ota::OtaImageState::New
+            || state == esp_bootloader_esp_idf::ota::OtaImageState::PendingVerify)
+    {
+        info!("Changed state to VALID");
+        ota.set_current_ota_state(esp_bootloader_esp_idf::ota::OtaImageState::Valid)
+            .unwrap();
     }
 
     info!("OTA :Currently selected partition {:?}", current);
