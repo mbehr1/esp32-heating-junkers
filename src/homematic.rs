@@ -316,6 +316,22 @@ where
     }
 }
 
+struct MyWSReadResult<'a>(&'a embedded_websocket::WebSocketReadResult);
+
+impl defmt::Format for MyWSReadResult<'_> {
+    fn format(&self, fmt: defmt::Formatter) {
+        let frame = &self.0;
+        defmt::write!(
+            fmt,
+            "WebSocketReadResult {{ len_from: {}, len_to: {}, end_of_message: {}, message_type: {:?} }}",
+            frame.len_from,
+            frame.len_to,
+            frame.end_of_message,
+            defmt::Debug2Format(&frame.message_type)
+        )
+    }
+}
+
 pub async fn websocket_connection<'a, T, D>(
     url: &str,
     headers: &[(&str, &str)],
@@ -417,7 +433,7 @@ where
             "Sent ping frame len {}, wrote {} bytes to websocket connection: {:?}",
             len,
             written,
-            defmt::Debug2Format(&tx_buffer[..written])
+            &tx_buffer[..written]
         );
         pings_sent += 1;
 
@@ -463,7 +479,7 @@ where
                                 info!(
                                     "Received websocket, new rx_buffer_used={} frame: {}",
                                     rx_buffer_used,
-                                    defmt::Debug2Format(&frame)
+                                    MyWSReadResult(&frame)
                                 );
                                 match frame.message_type {
                             embedded_websocket::WebSocketReceiveMessageType::Text => {
@@ -526,7 +542,7 @@ where
                                 warn!(
                                     "Failed to parse websocket frame: {:?} {:?}",
                                     defmt::Debug2Format(&e),
-                                    defmt::Debug2Format(&rx_buffer[..rx_buffer_used])
+                                    &rx_buffer[..rx_buffer_used]
                                 );
                                 if read == 0 {
                                     // no more data to read, might have garbage? (or frame too large?)
@@ -581,9 +597,7 @@ where
                             pings_sent += 1;
                             info!(
                                 "Sent ping frame len {}, wrote {} bytes to websocket connection",
-                                len,
-                                written //,
-                                        //defmt::Debug2Format(&tx_buffer[..written])
+                                len, written
                             );
                         }
                         Err(e) => {

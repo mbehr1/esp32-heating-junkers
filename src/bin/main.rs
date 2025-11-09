@@ -7,6 +7,7 @@
 // [] handle devices becoming stale, removed from event updates, not reachable...
 // [x] OTA update support
 // [x] log via tcp (interacts with remote-defmt-srv)
+// [x] remove debugfmt logs (CAN frame, WebSocketReadResult as they are too long strings as payload)
 // [] manual override of heating settings via touch display
 // [] check watchdog working on panics
 // [] get real time clock via sntp https://github.com/vpetrigo/sntpc/blob/master/sntpc/src/lib.rs

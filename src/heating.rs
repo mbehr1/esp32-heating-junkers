@@ -20,7 +20,7 @@ use embedded_can::{Frame, Id};
 use embedded_graphics::{pixelcolor::Rgb565, prelude::RgbColor};
 use esp_hal::{
     Blocking,
-    twai::{self, StandardId},
+    twai::{self, EspTwaiFrame, StandardId},
 };
 use heapless::{String, Vec};
 // use embedded_can::Frame;
@@ -374,7 +374,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
             match can.receive() {
                 Ok(frame) => {
                     // debug!("Received CAN frame: ID: {}, Data: {:?}", frame.id(), frame.data());
-                    info!("Received CAN frame: {}", defmt::Debug2Format(&frame));
+                    info!("Rcvd CAN frame: {}", MyEspTwaiFrame(&frame));
                     let data = frame.data();
                     match frame.id() {
                         Id::Standard(id) if matches!(id.as_raw(), CF_ERROR_MESSAGES) => {
@@ -705,7 +705,7 @@ async fn send_std_can_frame(
             }
         }
     }
-    info!("Sent CAN frame: ID: {}", defmt::Debug2Format(&frame.id()));
+    info!("Sent CAN frame: {}", MyEspTwaiFrame(&frame));
     Ok(())
 }
 
@@ -746,5 +746,22 @@ fn calc_heating_needs() -> u16 {
                 total_valve_position / devices.len() as u16
             }
         })
+    }
+}
+
+struct MyEspTwaiFrame<'a>(&'a EspTwaiFrame);
+impl defmt::Format for MyEspTwaiFrame<'_> {
+    fn format(&self, fmt: defmt::Formatter) {
+        let frame = self.0;
+        defmt::write!(
+            fmt,
+            "ID: 0x{:x}, DLC: {}, Data: {:?}",
+            match frame.id() {
+                Id::Standard(id) => id.as_raw() as u32,
+                Id::Extended(id) => id.as_raw(),
+            },
+            frame.dlc(),
+            frame.data()
+        );
     }
 }

@@ -166,6 +166,32 @@ impl Debug for EspImageHeader {
     }
 }
 
+impl defmt::Format for EspImageHeader {
+    fn format(&self, fmt: defmt::Formatter) {
+        // Copy packed fields to local variables to avoid unaligned references
+        let entry_addr = self.entry_addr;
+        let chip_id = self.chip_id;
+        let min_chip_rev_full = self.min_chip_rev_full;
+        let max_chip_rev_full = self.max_chip_rev_full;
+
+        defmt::write!(
+            fmt,
+            "EspImageHeader {{ magic: {}, segment_count: {}, spi_mode: {}, spi_speed: {}, spi_size: {}, entry_addr: 0x{:08x}, wp_pin: {}, chip_id: {:?}, min_chip_rev_full: {}, max_chip_rev_full: {}, hash_appended: {} }}",
+            self.magic,
+            self.segment_count,
+            self.spi_mode,
+            self.spi_speed(),
+            self.spi_size(),
+            entry_addr,
+            self.wp_pin,
+            chip_id,
+            min_chip_rev_full,
+            max_chip_rev_full,
+            self.hash_appended
+        )
+    }
+}
+
 const _: () = assert!(core::mem::size_of::<EspImageHeader>() == 24);
 const _: () = assert!(core::mem::size_of::<EspImageSegmentHeader>() == 8);
 
@@ -193,10 +219,7 @@ where
         warn!("Invalid image header size");
         return Err(embassy_net::tcp::Error::ConnectionReset);
     }
-    info!(
-        "Image header read: {}",
-        defmt::Debug2Format(&esp_image_header)
-    );
+    info!("Image header read: {}", esp_image_header);
     if esp_image_header.magic != 0xE9 {
         warn!("Invalid image magic");
         return Err(embassy_net::tcp::Error::ConnectionReset);
