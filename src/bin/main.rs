@@ -9,7 +9,7 @@
 // [x] log via tcp (interacts with remote-defmt-srv)
 // [x] remove debugfmt logs (CAN frame, WebSocketReadResult as they are too long strings as payload)
 // [] manual override of heating settings via touch display
-// [] check watchdog working on panics
+// [x] check watchdog working on panics
 // [] get real time clock via sntp https://github.com/vpetrigo/sntpc/blob/master/sntpc/src/lib.rs
 // [] fix [WARN ] Error during getCurrentState request: Some(Tls("MbedTlsError(-30592)")) (esp32-heating_junkers src/bin/main.rs:866) 0x7780, https://github.com/Mbed-TLS/mbedtls/blob/1873d3bfc2da771672bd8e7e8f41f57e0af77f33/include/mbedtls/ssl.h#L90 ERR_SSL_FATAL_ALERT_MESSAGE -> mbedtls_ssl_set_hostname() ?
 // [] custom bootloader with app rollback support. (specify new in in idf bootloader espflash.toml, https://github.com/espressif/esp-idf/tree/master/components/bootloader, https://danielmangum.com/posts/risc-v-bytes-exploring-custom-esp32-bootloader/...)
@@ -35,7 +35,7 @@
 use alloc::string::ToString;
 use axs5106l::Axs5106l;
 use core::cell::RefCell;
-use defmt::{debug, info, warn};
+use defmt::{debug, error, info, warn};
 use embassy_executor::Spawner;
 use embassy_net::{DhcpConfig, IpAddress, IpEndpoint, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
@@ -178,12 +178,19 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    info!(
-        "Reset reason: {:?}",
-        defmt::Debug2Format(&esp_hal::rtc_cntl::reset_reason(
-            esp_hal::system::Cpu::ProCpu
-        ))
-    );
+    let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
+
+    match reset_reason {
+        Some(esp_hal::rtc_cntl::SocResetReason::SysRtcWdt) => {
+            error!("System reset due to SysRtcWdt watchdog!");
+        }
+        Some(reason) => {
+            info!("Reset reason: {:?}", defmt::Debug2Format(&reason));
+        }
+        None => {
+            warn!("Reset reason: None!");
+        }
+    }
 
     /* hmac and aes still available
     // hmac:
@@ -477,6 +484,12 @@ async fn main(spawner: Spawner) -> ! {
                 // two touch fields:
                 // touch in upper half -> manual heating override on for 1h
                 // todo: add debounce detection after 1sec continous touch
+                if touch.y > (340 / 2) - 20 && touch.y < (340 / 2) + 20 {
+                    // in middle area -> ignore
+                    // to test panic handling:
+                    // works... :-) panic!("Test panic triggered");
+                    continue;
+                }
                 if touch.y < 340 / 2 {
                     info!("Manual heating override ON for 1h");
                     HEATER_OVERWRITE.lock(|ho| {

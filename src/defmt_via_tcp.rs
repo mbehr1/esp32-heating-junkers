@@ -6,7 +6,7 @@
 use defmt::{info, warn};
 use embassy_net::{IpEndpoint, Stack, tcp::TcpSocket};
 use embassy_time::{Duration, Timer};
-use portable_atomic::{AtomicBool, Ordering};
+use portable_atomic::{AtomicBool, AtomicUsize, Ordering};
 use rtt_target::{UpChannel, rtt_init};
 
 use embedded_storage::ReadStorage;
@@ -40,6 +40,7 @@ static mut PRODUCER: Option<fring::Producer<'static, LOG_RINGBUF_SIZE>> = None;
 static mut WRITE_REGION: Option<
     fring::Region<'static, fring::Producer<'static, LOG_RINGBUF_SIZE>>,
 > = None;
+static LOST_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl defmt::Logger for Logger {
     fn acquire() {
@@ -119,6 +120,12 @@ fn do_write(bytes: &[u8]) {
             // would avoid partial frames as well!
             region[..to_copy].copy_from_slice(&bytes[..to_copy]);
             region.consume(to_copy);
+
+            // did we loose/drop data?
+            if to_copy < bytes.len() {
+                let lost = bytes.len() - to_copy;
+                LOST_BYTES.fetch_add(lost, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -200,8 +207,16 @@ pub async fn log_serve_task(
         // we need to start with sending:
         // protocol version (our own)
         // build-id
+        let mut last_lost_logged = 0;
         loop {
             if log_consumer.data_size() == 0 {
+                // now we're idle check for lost bytes:
+                let lost = LOST_BYTES.load(Ordering::Relaxed);
+                if last_lost_logged != lost {
+                    last_lost_logged = lost;
+                    warn!("Lost {} bytes of log data", lost);
+                }
+
                 // todo: which minimal size to use?
                 Timer::after(Duration::from_millis(50)).await;
                 continue;
