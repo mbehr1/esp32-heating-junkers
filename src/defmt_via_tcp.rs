@@ -113,6 +113,13 @@ fn do_write(bytes: &[u8]) {
         if let Some(region) = &mut *core::ptr::addr_of_mut!(WRITE_REGION) {
             // write to region:
             let to_copy = bytes.len().min(region.len());
+
+            // did we loose/drop data?
+            if to_copy < bytes.len() {
+                let lost = bytes.len() - to_copy;
+                LOST_BYTES.fetch_add(lost, Ordering::Relaxed);
+            }
+
             if to_copy == 0 {
                 return;
             }
@@ -120,12 +127,6 @@ fn do_write(bytes: &[u8]) {
             // would avoid partial frames as well!
             region[..to_copy].copy_from_slice(&bytes[..to_copy]);
             region.consume(to_copy);
-
-            // did we loose/drop data?
-            if to_copy < bytes.len() {
-                let lost = bytes.len() - to_copy;
-                LOST_BYTES.fetch_add(lost, Ordering::Relaxed);
-            }
         }
     }
 }
