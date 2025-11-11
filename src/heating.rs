@@ -76,9 +76,9 @@ werden dann dann die IDs 202 und 203 benutzt.
 */
 
 /// max. Vorlauftemperatur Warmwasser (send from heating controller)
-const CF_WW_MAX_SUPPLY_TEMP: u16 = 0x204; // max allowed supply temp, 1 data byte (0.5 °C steps)
+const CF_WW_MAX_SUPPLY_TEMP: u16 = 0x202; // max allowed supply temp, 1 data byte (0.5 °C steps)
 /// aktuelle Vorlauftemperatur Warmwasser
-const CF_WW_CUR_SUPPLY_TEMP: u16 = 0x205; // current allowed supply temp, 1 data byte (0.5 °C steps)
+const CF_WW_CUR_SUPPLY_TEMP: u16 = 0x203; // current allowed supply temp, 1 data byte (0.5 °C steps)
 
 /// Störungsmeldungen Hex Wert siehe ( Bedienungsanleitung )  00=Heizung ok
 const CF_ERROR_MESSAGES: u16 = 0x206; // error messages, 1 data byte, hex value see manual, 00=heating ok
@@ -185,7 +185,7 @@ sends the following frames:
 /// state from the junkers heating controller
 /// only data we did receive
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Clone)]
 struct HeaterState {
     cur_heat_supply_temp_celsius: f32,
     max_heat_supply_temp_celsius: f32,
@@ -196,6 +196,22 @@ struct HeaterState {
     cur_heat_pump_on: bool,
 
     err_msg: u8, // only the last one for now, 0x00 = ok
+}
+
+impl defmt::Format for HeaterState {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(
+            fmt,
+            "HeaterState {{ Hzg Vorlauf: {}°C / max: {}°C, WW Vorlauf: {}°C / max: {}°C, Brenner: {}, Pumpe: {}, Fehler: 0x{:02x} }}",
+            self.cur_heat_supply_temp_celsius,
+            self.max_heat_supply_temp_celsius,
+            self.cur_ww_supply_temp_celsius,
+            self.max_ww_supply_temp_celsius,
+            if self.cur_burner_on { "ON" } else { "OFF" },
+            if self.cur_heat_pump_on { "ON" } else { "OFF" },
+            self.err_msg
+        )
+    }
 }
 
 /// target control values to send to the heating controller
@@ -283,6 +299,8 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
 
     // state of the heater
     let mut heater_state = HeaterState::default();
+    // to detect changes
+    let mut last_heater_state: HeaterState = HeaterState::default();
 
     // target values towards the heating controller:
     // we use a local variable here and update the global only when something changes
@@ -327,14 +345,7 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
         .unwrap();
 
     loop {
-        debug!(
-            "heating_task tick, can.bus_off(): {},.receive_error_count(): {}, .num_avail_msgs: {}",
-            can.is_bus_off(),
-            can.receive_error_count(),
-            can.num_available_messages()
-        );
         let heating_need_perc = calc_heating_needs(); // TODO no need to do this so often. Every 2s is enough...
-        debug!("Calculated heating need: {}%", heating_need_perc);
 
         // map it to two values:
         // heat needed? (heating_need_perc > 0)
@@ -380,7 +391,6 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                         Id::Standard(id) if matches!(id.as_raw(), CF_ERROR_MESSAGES) => {
                             if !data.is_empty() {
                                 let err_msg = data[0];
-                                info!("rcvd: Störungsmeldung: 0x{:02X}", err_msg);
                                 heater_state.err_msg = err_msg;
                                 // store time or e.g. history as well?
                             }
@@ -395,17 +405,9 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                                 let status = data[0] != 0;
                                 match id.as_raw() {
                                     CF_CUR_BURNER_STATUS => {
-                                        info!(
-                                            "rcvd: Aktueller Brennerstatus: {}",
-                                            if status { "AN" } else { "AUS" }
-                                        );
                                         heater_state.cur_burner_on = status;
                                     }
                                     CF_HEAT_CUR_PUMP_STATUS => {
-                                        info!(
-                                            "rcvd: Aktueller Heizungspumpenstatus: {}",
-                                            if status { "AN" } else { "AUS" }
-                                        );
                                         heater_state.cur_heat_pump_on = status;
                                     }
                                     _ => (),
@@ -426,19 +428,15 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                                 let temp_celsius = (cur_temp_raw as f32) / 2.0;
                                 match id.as_raw() {
                                     CF_HEAT_MAX_SUPPLY_TEMP => {
-                                        info!("rcvd: Max Vorlauftemp Hzg: {} °C", temp_celsius);
                                         heater_state.max_heat_supply_temp_celsius = temp_celsius;
                                     }
                                     CF_HEAT_CUR_SUPPLY_TEMP => {
-                                        info!("rcvd: Akt Vorlauftemp Hzg: {} °C", temp_celsius);
                                         heater_state.cur_heat_supply_temp_celsius = temp_celsius;
                                     }
                                     CF_WW_MAX_SUPPLY_TEMP => {
-                                        info!("rcvd: Max Vorlauftemp WW: {} °C", temp_celsius);
                                         heater_state.max_ww_supply_temp_celsius = temp_celsius;
                                     }
                                     CF_WW_CUR_SUPPLY_TEMP => {
-                                        info!("rcvd: Akt Vorlauftemp WW: {} °C", temp_celsius);
                                         heater_state.cur_ww_supply_temp_celsius = temp_celsius;
                                     }
                                     _ => (),
@@ -451,10 +449,10 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
                             }
                         }
                         Id::Standard(id) => {
-                            debug!("Standard ID: {}", defmt::Debug2Format(&id.as_raw()))
+                            debug!("Standard ID: {}", &id.as_raw())
                         }
                         Id::Extended(id) => {
-                            debug!("Extended ID: {}", defmt::Debug2Format(&id.as_raw()));
+                            debug!("Extended ID: {}", &id.as_raw());
                         }
                     }
                 }
@@ -504,6 +502,15 @@ pub async fn heating_task(can_config: esp_hal::twai::TwaiConfiguration<'static, 
             can.clear_receive_fifo();
         }
         // TODO handle receive error count!
+
+        // log heater state changes:
+        if heater_state != last_heater_state {
+            info!(
+                "Changed: {} at target {}C",
+                heater_state, target_supply_temp_celsius
+            );
+            last_heater_state = heater_state.clone();
+        }
 
         // wait a bit, there is so little traffic on the bus that we can wait a lot longer...
         Timer::after(Duration::from_millis(250)).await;
@@ -667,7 +674,7 @@ fn update_target_values_in_tx_queue(
     *tx_queue = new_queue;
 }
 
-/// Send a standard CAN frame with self-reception
+/// Send a standard CAN frame without self-reception
 ///
 /// # Parameters
 /// * `can` - Mutable reference to the TWAI controller
@@ -680,7 +687,7 @@ async fn send_std_can_frame(
     data: &[u8],
     auto_retries: u8,
 ) -> Result<(), nb::Error<twai::EspTwaiError>> {
-    let frame = twai::EspTwaiFrame::new_self_reception(
+    let frame = twai::EspTwaiFrame::new(
         StandardId::new(id).ok_or(twai::EspTwaiError::NonCompliantDlc(0xde))?,
         data,
     )
