@@ -212,9 +212,7 @@ where
         )
     };
     assert!(header_bytes.len() == 24);
-
-    let read = socket.read(header_bytes).await?;
-    debug!("Read {} bytes for image header", read);
+    let read = read_chunk(socket, header_bytes).await?;
     if read != core::mem::size_of::<EspImageHeader>() {
         warn!("Invalid image header size");
         return Err(embassy_net::tcp::Error::ConnectionReset);
@@ -296,9 +294,9 @@ where
                     core::mem::size_of::<EspImageSegmentHeader>(),
                 )
             };
-            let read = socket.read(seg_header_bytes).await?;
+            let read = read_chunk(socket, seg_header_bytes).await?;
             if read != core::mem::size_of::<EspImageSegmentHeader>() {
-                warn!("Invalid segment header size");
+                warn!("Invalid segment header size: read {} bytes", read);
                 return Err(embassy_net::tcp::Error::ConnectionReset);
             }
             let _ = socket.write(b"INFO: Processing segment ").await;
