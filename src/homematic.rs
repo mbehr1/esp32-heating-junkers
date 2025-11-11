@@ -294,7 +294,6 @@ where
             DEVICES.lock(|devices| {
                 let mut devices = devices.borrow_mut();
                 if let Some(pos) = devices.iter().position(|d| d.id == dev_id) {
-                    info!("  Updating existing device: {}", devices[pos]);
                     devices[pos] = heating_thermostat;
                     info!("  Updated existing device:  {}", devices[pos]);
                 } else {
@@ -568,7 +567,6 @@ where
                     break;
                 }
                 Either::Second(_) => {
-                    info!("Timeout waiting for data from websocket connection, sending ping...");
                     // check whether we did receive pongs for our pings:
                     if pings_sent.saturating_sub(pongs_rcvd_last_ping) > 2 {
                         warn!(
@@ -592,13 +590,9 @@ where
                     )
                     .await;
                     match written {
-                        Ok(written) => {
+                        Ok(_written) => {
                             //esp_mbedtls::asynch::io::Write::flush(&mut resource.conn).await?;
                             pings_sent += 1;
-                            info!(
-                                "Sent ping frame len {}, wrote {} bytes to websocket connection",
-                                len, written
-                            );
                         }
                         Err(e) => {
                             warn!(
