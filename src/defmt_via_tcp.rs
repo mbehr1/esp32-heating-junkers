@@ -16,10 +16,10 @@ use crate::ota::{EspImageHeader, EspImageSegmentHeader}; // TODO use core::sync:
 extern crate alloc;
 
 // ringbuffer used for tcp transfer
-const LOG_RINGBUF_SIZE: usize = 1024;
+const LOG_RINGBUF_SIZE: usize = 2 * 1024;
 static mut LOG_RINGBUF: fring::Buffer<LOG_RINGBUF_SIZE> = fring::Buffer::new();
 
-const RTT_BUFFER_SIZE: usize = 1024;
+const RTT_BUFFER_SIZE: usize = 512;
 static mut CHANNEL: Option<UpChannel> = None;
 
 #[defmt::global_logger]
